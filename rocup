@@ -1,0 +1,733 @@
+#!/bin/bash
+
+set -euo pipefail
+
+ROCUP_HOME=${ROCUP_HOME:-$HOME/.rocup}
+
+usage() {
+    cat <<EOF
+usage: $0 [alpha4 | latest | <hash> | <path> | list | remove <ver> | prune <N>]
+
+  alpha4          install/activate the alpha4-rolling release
+
+  latest          install/activate the most recent nightly from roc-lang/nightlies
+                  (default if no arg)
+
+  <hash>          7-char hex. If a local install with that hash is registered,
+                  activate it. Else if the nightly is already downloaded, activate
+                  it. Else fetch the nightly from roc-lang/nightlies and install.
+
+  <path>          register a local roc as 'local-<hash>' inside \$ROCUP_HOME (via
+                  symlink, not copy) and activate it. Directory: requires 'roc',
+                  optionally picks up 'roc_language_server'. File: links just roc.
+
+  list            show installed versions (alpha4, nightlies, locals) and mark
+                  the active one. Local entries show their resolved path.
+
+  remove <ver>    delete a version (alpha4, 7-char hash, or local-<hash>). A
+                  bare hash resolves to a registered local first, otherwise a
+                  nightly. If the removed version was active, the most recent
+                  remaining one becomes active. Removing a local only drops
+                  the registration; the actual local files are untouched.
+
+  prune <N>       keep the N most recent nightlies; delete older ones. The
+                  active nightly is always kept (counts toward N if it's
+                  already in the top N). alpha4 and locals are exempt.
+EOF
+}
+
+detect_platform() {
+    local os arch
+    os=$(uname -s)
+    arch=$(uname -m)
+    case "$os/$arch" in
+        Darwin/arm64)            echo "macos_apple_silicon" ;;
+        Darwin/x86_64)           echo "macos_x86_64" ;;
+        Linux/x86_64)            echo "linux_x86_64" ;;
+        Linux/aarch64|Linux/arm64) echo "linux_arm64" ;;
+        *)
+            echo "error: unsupported platform $os/$arch" >&2
+            exit 1
+            ;;
+    esac
+}
+
+mtime_of() {
+    if stat -f '%m' "$1" >/dev/null 2>&1; then
+        stat -f '%m' "$1"
+    else
+        stat -c '%Y' "$1"
+    fi
+}
+
+do_list() {
+    if [ ! -d "$ROCUP_HOME" ]; then
+        echo "no versions installed (no $ROCUP_HOME)"
+        return 0
+    fi
+
+    local active=""
+    if [ -L "$ROCUP_HOME/roc" ]; then
+        active=$(basename "$(readlink "$ROCUP_HOME/roc")")
+    fi
+
+    local tmp
+    tmp=$(mktemp)
+    find "$ROCUP_HOME" -maxdepth 1 -mindepth 1 \
+        \( -type d -o -type l \) \
+        \( -name 'roc-alpha4-rolling' -o -name 'roc_nightly-*' -o -name 'local-*' \) -print0 \
+        | while IFS= read -r -d '' dir; do
+            printf "%s %s\n" "$(mtime_of "$dir")" "$dir" >> "$tmp"
+        done
+
+    if [ ! -s "$tmp" ]; then
+        rm -f "$tmp"
+        echo "no versions installed in $ROCUP_HOME"
+        return 0
+    fi
+
+    sort -n "$tmp" | cut -d' ' -f2- | while IFS= read -r dir; do
+        local name marker="    "
+        name=$(basename "$dir")
+        if [ "$name" = "$active" ]; then
+            marker=" -> "
+        fi
+        case "$name" in
+            local-*)
+                local target
+                target=$(local_install_path "$dir")
+                printf "%s%-22s  %s\n" "$marker" "$name" "$target"
+                ;;
+            *)
+                printf "%s%s\n" "$marker" "$name"
+                ;;
+        esac
+    done
+    rm -f "$tmp"
+}
+
+# Remove a global symlink if it's dangling AND points back into $ROCUP_HOME.
+# Conservative: only cleans up links we created; leaves anything else alone.
+cleanup_dangling_global_link() {
+    local link="$1"
+    if [ ! -L "$link" ]; then
+        return 0
+    fi
+    # -e follows the symlink — if false but the link itself exists, it's dangling.
+    if [ -e "$link" ]; then
+        return 0
+    fi
+    local target
+    target=$(readlink "$link")
+    case "$target" in
+        "$ROCUP_HOME"/*) ;;
+        *) return 0 ;;
+    esac
+    local sudo=sudo
+    if [ -w "$(dirname "$link")" ]; then
+        sudo=""
+    fi
+    $sudo rm -f "$link"
+    echo ".. cleaned up dangling $link"
+}
+
+cleanup_dangling_global_links() {
+    local prefix="${ROCUP_PREFIX:-/usr/local/bin}"
+    cleanup_dangling_global_link "$prefix/roc"
+    cleanup_dangling_global_link "$prefix/roc_language_server"
+}
+
+remove_version() {
+    # $1 = "alpha4", 7-char hash, or "local-<7-char-hash>"
+    # For a bare 7-char hash, prefer a registered local-<hash>; otherwise treat
+    # as a nightly hash. Matches the dispatch order used by `rocup <hash>`.
+    local ver="$1"
+    local dir_name
+    case "$ver" in
+        alpha4)
+            dir_name="roc-alpha4-rolling"
+            ;;
+        local-*)
+            if [[ ! "${ver#local-}" =~ ^[0-9a-f]{7}$ ]]; then
+                echo "error: invalid local install name '$ver' (expected 'local-<7-char-hex>')" >&2
+                exit 1
+            fi
+            dir_name="$ver"
+            ;;
+        *)
+            if [[ "$ver" =~ ^[0-9a-f]{7}$ ]]; then
+                if [ -e "$ROCUP_HOME/local-$ver" ] || [ -L "$ROCUP_HOME/local-$ver" ]; then
+                    dir_name="local-$ver"
+                else
+                    dir_name="roc_nightly-$ver"
+                fi
+            else
+                echo "error: invalid version '$ver' (expected 'alpha4', 7-char hash, or 'local-<hash>')" >&2
+                exit 1
+            fi
+            ;;
+    esac
+
+    local target_dir="$ROCUP_HOME/$dir_name"
+    if [ ! -e "$target_dir" ] && [ ! -L "$target_dir" ]; then
+        echo "error: $target_dir does not exist; nothing to remove" >&2
+        exit 1
+    fi
+
+    local was_active=0
+    if [ -L "$ROCUP_HOME/roc" ] && [ "$(basename "$(readlink "$ROCUP_HOME/roc")")" = "$dir_name" ]; then
+        was_active=1
+    fi
+
+    echo ".. removing $target_dir"
+    if [ -L "$target_dir" ]; then
+        rm -f "$target_dir"
+    else
+        rm -rf "$target_dir"
+    fi
+
+    if [ "$was_active" -eq 0 ]; then
+        return 0
+    fi
+
+    # Active version was removed — pick the most recent remaining as fallback.
+    local fallback=""
+    local tmp
+    tmp=$(mktemp)
+    find "$ROCUP_HOME" -maxdepth 1 -mindepth 1 \
+        \( -type d -o -type l \) \
+        \( -name 'roc-alpha4-rolling' -o -name 'roc_nightly-*' -o -name 'local-*' \) -print0 \
+        | while IFS= read -r -d '' dir; do
+            printf "%s %s\n" "$(mtime_of "$dir")" "$dir" >> "$tmp"
+        done
+
+    if [ -s "$tmp" ]; then
+        fallback=$(sort -n "$tmp" | tail -n1 | cut -d' ' -f2-)
+    fi
+    rm -f "$tmp"
+
+    if [ -n "$fallback" ]; then
+        activate "$(basename "$fallback")"
+    else
+        rm -f "$ROCUP_HOME/roc"
+        echo ".. no remaining versions; removed $ROCUP_HOME/roc symlink"
+        cleanup_dangling_global_links
+    fi
+}
+
+prune_nightlies() {
+    # $1 = number of most recent nightlies to keep (non-negative integer).
+    local keep="$1"
+    if ! [[ "$keep" =~ ^[0-9]+$ ]]; then
+        echo "error: prune count must be a non-negative integer (got '$keep')" >&2
+        exit 1
+    fi
+
+    if [ ! -d "$ROCUP_HOME" ]; then
+        echo "no nightlies installed (no $ROCUP_HOME)"
+        return 0
+    fi
+
+    local active=""
+    if [ -L "$ROCUP_HOME/roc" ]; then
+        active=$(basename "$(readlink "$ROCUP_HOME/roc")")
+    fi
+
+    # Collect nightly dirs with their mtimes.
+    local tmp
+    tmp=$(mktemp)
+    find "$ROCUP_HOME" -maxdepth 1 -mindepth 1 -type d \
+        -name 'roc_nightly-*' -print0 \
+        | while IFS= read -r -d '' dir; do
+            printf "%s %s\n" "$(mtime_of "$dir")" "$dir" >> "$tmp"
+        done
+
+    if [ ! -s "$tmp" ]; then
+        rm -f "$tmp"
+        echo "no nightlies to prune"
+        return 0
+    fi
+
+    # Sort most-recent first.
+    local sorted
+    sorted=$(sort -rn "$tmp" | cut -d' ' -f2-)
+    rm -f "$tmp"
+
+    # Keep the top $keep entries (most recent first). The active version is
+    # also kept, but only counts as "extra" if it falls outside the top $keep —
+    # so 'prune 1' on the most recent nightly correctly keeps just one.
+    local pos=0 removed=0
+    while IFS= read -r dir; do
+        local name
+        name=$(basename "$dir")
+        pos=$((pos + 1))
+        if [ "$pos" -le "$keep" ]; then
+            if [ "$name" = "$active" ]; then
+                echo "    keep $name (active)"
+            else
+                echo "    keep $name"
+            fi
+        elif [ "$name" = "$active" ]; then
+            echo "    keep $name (active)"
+        else
+            echo "  remove $name"
+            rm -rf "$dir"
+            removed=$((removed + 1))
+        fi
+    done <<< "$sorted"
+
+    echo ".. pruned $removed nightlies"
+}
+
+activate() {
+    # $1 = directory name under $ROCUP_HOME to activate (e.g. roc-alpha4-rolling)
+    local target_dir="$ROCUP_HOME/$1"
+    if [ -L "$target_dir" ] && [ ! -e "$target_dir" ]; then
+        echo "error: $target_dir is a dangling symlink (the local source directory has been moved or deleted)" >&2
+        exit 1
+    fi
+    if [ ! -d "$target_dir" ]; then
+        echo "error: $target_dir does not exist; cannot activate" >&2
+        exit 1
+    fi
+    ln -sfn "$target_dir" "$ROCUP_HOME/roc"
+    echo ".. active version: $1"
+    if [ -x "$target_dir/roc" ]; then
+        echo ".. roc binary: $target_dir/roc"
+    fi
+}
+
+install_alpha4() {
+    local platform="$1"
+    local dir_name="roc-alpha4-rolling"
+    local target_dir="$ROCUP_HOME/$dir_name"
+    local url="https://github.com/roc-lang/roc/releases/download/alpha4-rolling/roc-${platform}-alpha4-rolling.tar.gz"
+
+    mkdir -p "$ROCUP_HOME"
+
+    if [ -x "$target_dir/roc" ]; then
+        echo ".. alpha4 already extracted at $target_dir; skipping download"
+    else
+        echo ".. downloading alpha4 ($platform)"
+        echo ".. url: $url"
+        mkdir -p "$target_dir"
+        local tmp
+        tmp=$(mktemp "${TMPDIR:-/tmp}/rocup-alpha4.XXXXXX")
+        if ! curl -fL --progress-bar -o "$tmp" "$url"; then
+            echo "error: download failed" >&2
+            rm -f "$tmp"
+            rmdir "$target_dir" 2>/dev/null || true
+            exit 1
+        fi
+        echo ".. extracting"
+        if ! tar xzf "$tmp" --strip-components=1 -C "$target_dir"; then
+            echo "error: extract failed" >&2
+            rm -f "$tmp"
+            rm -rf "$target_dir"
+            exit 1
+        fi
+        rm -f "$tmp"
+    fi
+
+    activate "$dir_name"
+}
+
+month_name_to_num() {
+    # Nightly tags use the full month name ("January", "February", ...). Some
+    # older / inconsistent tooling has used 3-letter abbreviations ("Jan", ...)
+    # so accept both forms.
+    case "$1" in
+        Jan|January)    echo 01 ;;
+        Feb|February)   echo 02 ;;
+        Mar|March)      echo 03 ;;
+        Apr|April)      echo 04 ;;
+        May)            echo 05 ;;
+        Jun|June)       echo 06 ;;
+        Jul|July)       echo 07 ;;
+        Aug|August)     echo 08 ;;
+        Sep|September)  echo 09 ;;
+        Oct|October)    echo 10 ;;
+        Nov|November)   echo 11 ;;
+        Dec|December)   echo 12 ;;
+        *)
+            echo "error: unknown month name '$1'" >&2
+            return 1
+            ;;
+    esac
+}
+
+# fetch_recent_tags <repo> <count>
+# Echoes tag names newline-separated, most recent first. Tries gh first,
+# falls back to the public GitHub REST API via curl (no auth required for
+# public repos) when gh is missing, unauthenticated, or returns no rows.
+fetch_recent_tags() {
+    local repo="$1" count="$2"
+    if command -v gh >/dev/null 2>&1; then
+        local out
+        if out=$(gh release list --repo "$repo" --limit "$count" \
+                     --json tagName --jq '.[].tagName' 2>/dev/null) \
+           && [ -n "$out" ]; then
+            echo "$out"
+            return 0
+        fi
+    fi
+    # GitHub REST API silently caps per_page at 100, so paginate when count > 100
+    # to match what the gh path can see.
+    local pages_needed=$(( (count + 99) / 100 ))
+    [ "$pages_needed" -lt 1 ] && pages_needed=1
+    local page json combined=""
+    for page in $(seq 1 "$pages_needed"); do
+        if ! json=$(curl -sfL "https://api.github.com/repos/$repo/releases?per_page=100&page=$page"); then
+            echo "error: failed to fetch releases for $repo (gh unavailable or unauthenticated, and curl request failed on page $page)" >&2
+            return 1
+        fi
+        combined+="$json"$'\n'
+    done
+    echo "$combined" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' \
+                     | sed 's/.*"\([^"]*\)"$/\1/'
+}
+
+# download_nightly_asset <tag> <platform> <hash> <dest_dir>
+# Downloads the matching nightly tarball into dest_dir. Echoes its path.
+# Tries gh release download first, falls back to a direct curl from the
+# public download URL (which doesn't require auth for public releases).
+download_nightly_asset() {
+    local tag="$1" platform="$2" hash="$3" dest_dir="$4"
+    local pattern="roc_nightly-${platform}-*-${hash}.tar.gz"
+
+    if command -v gh >/dev/null 2>&1; then
+        if gh release download "$tag" --repo roc-lang/nightlies \
+                --pattern "$pattern" --dir "$dest_dir" 2>/dev/null; then
+            local found
+            found=$(find "$dest_dir" -maxdepth 1 -name "$pattern" -print -quit)
+            if [ -n "$found" ]; then
+                echo "$found"
+                return 0
+            fi
+        fi
+    fi
+
+    # curl fallback: reconstruct the asset filename from the tag.
+    # Tag format: nightly-YYYY-Mmm-DD-<hash>; asset uses numeric month.
+    local _prefix year mon_name day t_hash
+    IFS=- read -r _prefix year mon_name day t_hash <<< "$tag"
+    if [ "$_prefix" != "nightly" ] || [ -z "$year" ] || [ -z "$mon_name" ] || [ -z "$day" ] || [ -z "$t_hash" ]; then
+        echo "error: unexpected nightly tag format: $tag" >&2
+        return 1
+    fi
+    local mon_num
+    if ! mon_num=$(month_name_to_num "$mon_name"); then
+        return 1
+    fi
+    local asset="roc_nightly-${platform}-${year}-${mon_num}-${day}-${t_hash}.tar.gz"
+    local url="https://github.com/roc-lang/nightlies/releases/download/${tag}/${asset}"
+    local out="$dest_dir/$asset"
+    if ! curl -fL --progress-bar -o "$out" "$url"; then
+        echo "error: download failed: $url" >&2
+        return 1
+    fi
+    echo "$out"
+}
+
+resolve_latest_hash() {
+    local tags tag hash
+    if ! tags=$(fetch_recent_tags roc-lang/nightlies 1); then
+        exit 1
+    fi
+    tag="${tags%%$'\n'*}"
+    if [ -z "$tag" ]; then
+        echo "error: could not find any nightly releases in roc-lang/nightlies" >&2
+        exit 1
+    fi
+    hash="${tag##*-}"
+    if [[ ! "$hash" =~ ^[0-9a-f]{7}$ ]]; then
+        echo "error: latest release tag '$tag' did not end in a 7-char hash" >&2
+        exit 1
+    fi
+    echo "$hash"
+}
+
+install_nightly() {
+    local hash="$1"
+    local platform="$2"
+    local dir_name="roc_nightly-$hash"
+    local target_dir="$ROCUP_HOME/$dir_name"
+
+    mkdir -p "$ROCUP_HOME"
+
+    if [ -x "$target_dir/roc" ]; then
+        echo ".. nightly $hash already extracted at $target_dir; skipping download"
+        activate "$dir_name"
+        return 0
+    fi
+
+    echo ".. looking up nightly release with hash $hash"
+    local tags
+    if ! tags=$(fetch_recent_tags roc-lang/nightlies 200); then
+        exit 1
+    fi
+    local tag=""
+    while IFS= read -r line; do
+        if [[ "$line" == *-"$hash" ]]; then
+            tag="$line"
+            break
+        fi
+    done <<< "$tags"
+
+    if [ -z "$tag" ]; then
+        echo "error: no nightly release with hash '$hash' found in roc-lang/nightlies" >&2
+        exit 1
+    fi
+    echo ".. found release: $tag"
+
+    local download_dir
+    download_dir=$(mktemp -d "${TMPDIR:-/tmp}/rocup-nightly.XXXXXX")
+    echo ".. downloading nightly asset for $platform"
+    local tarball
+    if ! tarball=$(download_nightly_asset "$tag" "$platform" "$hash" "$download_dir"); then
+        rm -rf "$download_dir"
+        exit 1
+    fi
+
+    echo ".. extracting"
+    mkdir -p "$target_dir"
+    if ! tar xzf "$tarball" --strip-components=1 -C "$target_dir"; then
+        echo "error: extract failed" >&2
+        rm -rf "$target_dir" "$download_dir"
+        exit 1
+    fi
+    rm -rf "$download_dir"
+
+    activate "$dir_name"
+}
+
+sha256_hex() {
+    # Echoes the hex sha256 of stdin. Uses shasum (macOS, also common on Linux)
+    # with sha256sum as a fallback for systems that only ship the GNU coreutils
+    # variant.
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk '{print $1}'
+    else
+        echo "error: neither 'shasum' nor 'sha256sum' is available; cannot hash path" >&2
+        return 1
+    fi
+}
+
+# local_install_path <entry-path>
+# Given $ROCUP_HOME/local-<hash>, echo the resolved absolute path of the local
+# build it represents. For dir-symlink entries, that's the symlink target (the
+# local build directory). For file-style entries (a real dir with a 'roc'
+# symlink), it's the full path of the roc symlink's target (the local file).
+local_install_path() {
+    local entry="$1"
+    if [ -L "$entry" ]; then
+        readlink "$entry"
+    elif [ -d "$entry" ] && [ -L "$entry/roc" ]; then
+        readlink "$entry/roc"
+    fi
+}
+
+register_local() {
+    # $1 = directory containing roc[+roc_language_server] OR path to a roc binary.
+    # Registers it as $ROCUP_HOME/local-<7-char-hash-of-abs-path> and activates.
+    local input="$1"
+    local abs_path mode=""
+
+    if [ -d "$input" ]; then
+        abs_path=$(cd "$input" && pwd)
+        if [ ! -x "$abs_path/roc" ]; then
+            echo "error: no executable 'roc' found in $abs_path" >&2
+            exit 1
+        fi
+        mode="dir"
+    elif [ -f "$input" ]; then
+        if [ ! -x "$input" ]; then
+            echo "error: $input is not executable" >&2
+            exit 1
+        fi
+        local d
+        d=$(cd "$(dirname "$input")" && pwd)
+        abs_path="$d/$(basename "$input")"
+        mode="file"
+    else
+        echo "error: $input does not exist" >&2
+        exit 1
+    fi
+
+    mkdir -p "$ROCUP_HOME"
+
+    local hash dir_name entry
+    hash=$(printf '%s' "$abs_path" | sha256_hex | cut -c1-7)
+    dir_name="local-$hash"
+    entry="$ROCUP_HOME/$dir_name"
+
+    if [ -e "$entry" ] || [ -L "$entry" ]; then
+        echo ".. $dir_name already registered ($abs_path)"
+    elif [ "$mode" = "dir" ]; then
+        ln -sfn "$abs_path" "$entry"
+        echo ".. registered $dir_name -> $abs_path"
+    else
+        mkdir -p "$entry"
+        ln -sfn "$abs_path" "$entry/roc"
+        echo ".. registered $dir_name (file: $abs_path)"
+    fi
+
+    activate "$dir_name"
+}
+
+install_ls_shim() {
+    # $1 = prefix dir. Writes a static shim script at $prefix/roc_language_server
+    # that, at runtime, either execs the active version's LS binary or prints
+    # a helpful error if the active version doesn't ship one. The shim is
+    # installed once (with sudo if needed) and never touched on version switches.
+    local prefix="$1"
+    local sudo=sudo
+    if [ -w "$prefix" ]; then
+        sudo=""
+    fi
+    local tmp
+    tmp=$(mktemp "${TMPDIR:-/tmp}/rocup-lsshim.XXXXXX")
+    cat > "$tmp" <<'EOF'
+#!/bin/bash
+# Installed by rocup. Resolves the language server for whichever roc is active:
+#   1. If the active version ships a standalone roc_language_server, exec it.
+#   2. Else if the active 'roc' binary supports 'experimental-lsp', delegate.
+#   3. Else print a helpful error.
+ROCUP_HOME=${ROCUP_HOME:-$HOME/.rocup}
+LS="$ROCUP_HOME/roc/roc_language_server"
+ROC="$ROCUP_HOME/roc/roc"
+
+if [ -x "$LS" ]; then
+    exec "$LS" "$@"
+fi
+
+# Probe whether the active roc supports the 'experimental-lsp' subcommand.
+# `roc help <subcommand>` exits 0 if the subcommand exists, non-zero otherwise.
+if [ -x "$ROC" ] && "$ROC" help experimental-lsp >/dev/null 2>&1; then
+    exec "$ROC" experimental-lsp "$@"
+fi
+
+{
+    echo "error: no language server available for the active roc version."
+    if [ -L "$ROCUP_HOME/roc" ]; then
+        echo "       active version: $(basename "$(readlink "$ROCUP_HOME/roc")")"
+    fi
+    echo "       Neither a standalone roc_language_server binary nor a"
+    echo "       'roc experimental-lsp' subcommand was found."
+} >&2
+exit 127
+EOF
+    chmod 755 "$tmp"
+    $sudo mv "$tmp" "$prefix/roc_language_server"
+    echo ".. installed roc_language_server shim at $prefix/roc_language_server"
+}
+
+ensure_global_symlinks() {
+    # PREFIX overrides /usr/local/bin (used for testing).
+    local prefix="${ROCUP_PREFIX:-/usr/local/bin}"
+    local script_path
+    script_path=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+
+    local sudo=sudo
+    if [ -w "$prefix" ]; then
+        sudo=""
+    fi
+
+    if [ -L "$prefix/rocup" ] && [ -L "$prefix/roc" ]; then
+        # User has consented previously. Refresh /usr/local/bin/roc only if
+        # the target has actually changed — a no-op ln -sf would still require
+        # write access to $prefix, prompting sudo on systems where it's root-
+        # owned. The LS shim, once installed, doesn't need touching at all.
+        if [ "$(readlink "$prefix/roc")" != "$ROCUP_HOME/roc/roc" ]; then
+            $sudo ln -sf "$ROCUP_HOME/roc/roc" "$prefix/roc"
+        fi
+        # Replace any legacy LS symlink with the shim, or install for the
+        # first time if the file is missing entirely. After this, switching
+        # active versions never touches $prefix/roc_language_server.
+        if [ -L "$prefix/roc_language_server" ] || [ ! -f "$prefix/roc_language_server" ]; then
+            install_ls_shim "$prefix"
+        fi
+        return 0
+    fi
+
+    echo ".. attempting to create symlinks in $prefix"
+    local reply
+    if [ "${ROCUP_ASSUME_YES:-0}" = "1" ]; then
+        reply=y
+    else
+        read -r -p ".. overwrite rocup, roc, and roc_language_server in $prefix? [y/N] " reply
+    fi
+    case "$reply" in
+        y|Y|yes|YES|Yes) ;;
+        *) echo ".. skipping global symlinks"; return 0 ;;
+    esac
+
+    $sudo ln -sf "$script_path" "$prefix/rocup"
+    $sudo ln -sf "$ROCUP_HOME/roc/roc" "$prefix/roc"
+    install_ls_shim "$prefix"
+    echo ".. global symlinks installed in $prefix"
+}
+
+cmd=${1:-latest}
+
+case "$cmd" in
+    -h|--help|help)
+        usage
+        exit 0
+        ;;
+    alpha4)
+        platform=$(detect_platform)
+        install_alpha4 "$platform"
+        ensure_global_symlinks
+        ;;
+    latest)
+        platform=$(detect_platform)
+        hash=$(resolve_latest_hash)
+        echo ".. latest nightly hash: $hash"
+        install_nightly "$hash" "$platform"
+        ensure_global_symlinks
+        ;;
+    list)
+        do_list
+        ;;
+    remove)
+        if [ $# -lt 2 ]; then
+            echo "error: 'remove' requires an argument (alpha4, 7-char hash, or local-<hash>)" >&2
+            usage >&2
+            exit 1
+        fi
+        remove_version "$2"
+        ;;
+    prune)
+        if [ $# -lt 2 ]; then
+            echo "error: 'prune' requires a count (e.g. 'rocup prune 3')" >&2
+            usage >&2
+            exit 1
+        fi
+        prune_nightlies "$2"
+        ;;
+    *)
+        if [[ "$cmd" =~ ^[0-9a-f]{7}$ ]]; then
+            # Hash: try local cache first, otherwise treat as a nightly hash
+            # (install_nightly itself short-circuits when already downloaded).
+            if [ -e "$ROCUP_HOME/local-$cmd" ] || [ -L "$ROCUP_HOME/local-$cmd" ]; then
+                echo ".. activating local-$cmd"
+                activate "local-$cmd"
+                ensure_global_symlinks
+            else
+                platform=$(detect_platform)
+                install_nightly "$cmd" "$platform"
+                ensure_global_symlinks
+            fi
+        elif [ -e "$cmd" ]; then
+            register_local "$cmd"
+            ensure_global_symlinks
+        else
+            echo "error: invalid argument '$cmd'" >&2
+            usage >&2
+            exit 1
+        fi
+        ;;
+esac
