@@ -207,20 +207,40 @@ remove_version() {
         return 0
     fi
 
-    # Active version was removed — pick the most recent remaining as fallback.
+    # Active version was removed — pick a fallback in category-priority order:
+    # most recent nightly first, else alpha4, else most recent local. Within a
+    # category, the most recent (by dir_sort_key) wins.
     local fallback=""
     local tmp
     tmp=$(mktemp)
+
     find "$ROCUP_HOME" -maxdepth 1 -mindepth 1 \
         \( -type d -o -type l \) \
-        \( -name 'roc-alpha4-rolling' -o -name 'roc_nightly-*' -o -name 'local-*' \) -print0 \
+        -name 'roc_nightly-*' -print0 \
         | while IFS= read -r -d '' dir; do
             printf "%s %s\n" "$(dir_sort_key "$dir")" "$dir" >> "$tmp"
         done
-
     if [ -s "$tmp" ]; then
         fallback=$(sort "$tmp" | tail -n1 | cut -d' ' -f2-)
     fi
+
+    if [ -z "$fallback" ] && [ -d "$ROCUP_HOME/roc-alpha4-rolling" ]; then
+        fallback="$ROCUP_HOME/roc-alpha4-rolling"
+    fi
+
+    if [ -z "$fallback" ]; then
+        : > "$tmp"
+        find "$ROCUP_HOME" -maxdepth 1 -mindepth 1 \
+            \( -type d -o -type l \) \
+            -name 'local-*' -print0 \
+            | while IFS= read -r -d '' dir; do
+                printf "%s %s\n" "$(dir_sort_key "$dir")" "$dir" >> "$tmp"
+            done
+        if [ -s "$tmp" ]; then
+            fallback=$(sort "$tmp" | tail -n1 | cut -d' ' -f2-)
+        fi
+    fi
+
     rm -f "$tmp"
 
     if [ -n "$fallback" ]; then
