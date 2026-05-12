@@ -13,9 +13,11 @@ usage: $0 [alpha4 | latest | <hash> | <path> | +N | -N | list | remove <ver> | p
   latest          install/activate the most recent nightly from roc-lang/nightlies
                   (default if no arg)
 
-  <hash>          7-char hex. If a local install with that hash is registered,
-                  activate it. Else if the nightly is already downloaded, activate
-                  it. Else fetch the nightly from roc-lang/nightlies and install.
+  <hash>          7- or 8-char hex (8-char matches 'roc --version' output, which
+                  is then truncated to 7 to look up GitHub releases). If a local
+                  install with that hash is registered, activate it. Else if the
+                  nightly is already downloaded, activate it. Else fetch the
+                  nightly from roc-lang/nightlies and install.
 
   <path>          register a local roc as 'local-<hash>' inside \$ROCUP_HOME (via
                   symlink, not copy) and activate it. Directory: requires 'roc',
@@ -30,8 +32,8 @@ usage: $0 [alpha4 | latest | <hash> | <path> | +N | -N | list | remove <ver> | p
   list            show installed versions (alpha4, nightlies, locals) and mark
                   the active one. Local entries show their resolved path.
 
-  remove <ver>    delete a version (alpha4, 7-char hash, or local-<hash>). A
-                  bare hash resolves to a registered local first, otherwise a
+  remove <ver>    delete a version (alpha4, 7- or 8-char hash, or local-<hash>).
+                  A bare hash resolves to a registered local first, otherwise a
                   nightly. If the removed version was active, the most recent
                   remaining one becomes active. Removing a local only drops
                   the registration; the actual local files are untouched.
@@ -161,20 +163,23 @@ remove_version() {
             dir_name="$ver"
             ;;
         *)
-            if [[ "$ver" =~ ^[0-9a-f]{7}$ ]]; then
-                if [ -e "$ROCUP_HOME/local-$ver" ] || [ -L "$ROCUP_HOME/local-$ver" ]; then
-                    dir_name="local-$ver"
+            if [[ "$ver" =~ ^[0-9a-f]{7,8}$ ]]; then
+                # 'roc --version' emits 8-char; normalize to 7 to match
+                # the GitHub-tag / on-disk convention.
+                local hash="${ver:0:7}"
+                if [ -e "$ROCUP_HOME/local-$hash" ] || [ -L "$ROCUP_HOME/local-$hash" ]; then
+                    dir_name="local-$hash"
                 else
-                    dir_name=$(find_nightly_dir "$ver")
+                    dir_name=$(find_nightly_dir "$hash")
                     if [ -z "$dir_name" ]; then
                         # Nothing installed for this hash. Fall through with
                         # the canonical legacy name so the "does not exist"
                         # check below produces a helpful error.
-                        dir_name="roc_nightly-$ver"
+                        dir_name="roc_nightly-$hash"
                     fi
                 fi
             else
-                echo "error: invalid version '$ver' (expected 'alpha4', 7-char hash, or 'local-<hash>')" >&2
+                echo "error: invalid version '$ver' (expected 'alpha4', 7- or 8-char hash, or 'local-<hash>')" >&2
                 exit 1
             fi
             ;;
@@ -970,16 +975,19 @@ case "$cmd" in
         if [[ "$cmd" =~ ^[+-][0-9]+$ ]]; then
             step_nightly "$cmd"
             ensure_global_symlinks
-        elif [[ "$cmd" =~ ^[0-9a-f]{7}$ ]]; then
+        elif [[ "$cmd" =~ ^[0-9a-f]{7,8}$ ]]; then
             # Hash: try local cache first, otherwise treat as a nightly hash
             # (install_nightly itself short-circuits when already downloaded).
-            if [ -e "$ROCUP_HOME/local-$cmd" ] || [ -L "$ROCUP_HOME/local-$cmd" ]; then
-                echo ".. activating local-$cmd"
-                activate "local-$cmd"
+            # 'roc --version' emits the 8-char form of the same hash GitHub
+            # uses 7-char tags for; accept either and normalize to 7.
+            hash="${cmd:0:7}"
+            if [ -e "$ROCUP_HOME/local-$hash" ] || [ -L "$ROCUP_HOME/local-$hash" ]; then
+                echo ".. activating local-$hash"
+                activate "local-$hash"
                 ensure_global_symlinks
             else
                 platform=$(detect_platform)
-                install_nightly "$cmd" "$platform"
+                install_nightly "$hash" "$platform"
                 ensure_global_symlinks
             fi
         elif [ -e "$cmd" ]; then
