@@ -39,7 +39,7 @@ After the first successful install:
 ## Usage
 
 ```
-rocup [alpha4 | latest | <hash> | <path> | list | remove <ver> | prune <N>]
+rocup [alpha4 | latest | <hash> | <path> | +N | -N | list | remove <ver> | prune <N>]
 ```
 
 | Command | What it does |
@@ -48,6 +48,7 @@ rocup [alpha4 | latest | <hash> | <path> | list | remove <ver> | prune <N>]
 | `rocup latest` | Install/activate the most recent nightly from `roc-lang/nightlies`. This is the default if no argument is given. |
 | `rocup <hash>` | 7-char hex. If a local install with that hash is registered, activate it. Otherwise activate the matching nightly (downloading it if necessary). |
 | `rocup <path>` | Register a local `roc` build as `local-<hash>` and activate it. Path may be a directory containing `roc` (and optionally `roc_language_server`), or a path to a `roc` binary directly. Registration is by symlink, not copy. |
+| `rocup +N` / `rocup -N` | Step `N` nightlies newer (`+`) or older (`-`) than the active one. Resolves against the `roc-lang/nightlies` release timeline, falling back to installed nightlies only when offline. Requires the active version to be a nightly. |
 | `rocup list` | Show installed versions, oldest first, with the active version marked `->`. Local entries also show their resolved path. |
 | `rocup remove <ver>` | Delete a version — `alpha4`, a 7-char hash, or `local-<hash>`. A bare hash resolves to a registered local first, otherwise a nightly. If the removed version was active, the most recent remaining one becomes active. Removing a local only drops the registration; the actual source files are untouched. |
 | `rocup prune <N>` | Keep the `N` most recent nightlies; delete older ones. `alpha4` and local registrations are exempt. The active nightly is always kept. |
@@ -59,6 +60,8 @@ rocup                        # install/activate the latest nightly
 rocup alpha4                 # switch to the alpha4-rolling release
 rocup a1b2c3d                # activate (or download) nightly a1b2c3d
 rocup ~/src/roc/zig-out/bin  # register and activate a local dev build
+rocup -1                     # step back to the previous nightly
+rocup +2                     # step forward two nightlies from active
 rocup list                   # see what's installed
 rocup remove a1b2c3d         # remove a specific version
 rocup prune 5                # keep the 5 most recent nightlies
