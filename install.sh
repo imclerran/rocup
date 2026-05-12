@@ -1,11 +1,12 @@
 #!/bin/sh
-# rocup installer. Downloads the rocup script into $ROCUP_HOME and runs it to
-# install the latest Roc nightly, optionally wiring up global symlinks in
-# $ROCUP_PREFIX. Designed to be safe to pipe from curl:
+# rocup installer. Downloads the rocup script into $ROCUP_HOME, installs the
+# latest Roc nightly, and creates symlinks for rocup, roc, and
+# roc_language_server in $ROCUP_PREFIX. Designed to be safe to pipe from curl:
 #
 #   curl -fsSL https://raw.githubusercontent.com/imclerran/rocup/main/install.sh | sh
 #
-# Reads the consent prompt from /dev/tty so it works even when stdin is a pipe.
+# Reads the confirmation from /dev/tty so it works even when stdin is a pipe.
+# Set ROCUP_ASSUME_YES=1 to skip the prompt (e.g. in CI).
 
 set -eu
 
@@ -21,21 +22,27 @@ if ! command -v curl >/dev/null 2>&1; then
     exit 1
 fi
 
-# Ask up front (via /dev/tty so curl | sh works). Default to yes — matches the
-# tone of similar installers (uv, rustup) where the user opted into a one-liner.
-assume_yes=0
+cat <<EOF
+This will install rocup:
+  * Download the latest Roc nightly into $ROCUP_HOME
+  * Create symlinks for rocup, roc, and roc_language_server in $ROCUP_PREFIX
+    (sudo may be required to write to that directory)
+
+EOF
+
 if [ "${ROCUP_ASSUME_YES:-}" = "1" ]; then
-    assume_yes=1
+    :
 elif [ -r /dev/tty ]; then
-    printf "Install symlinks for rocup, roc, and roc_language_server in %s? [Y/n] " "$ROCUP_PREFIX" > /dev/tty
+    printf "Proceed? [Y/n] " > /dev/tty
     reply=""
     read -r reply < /dev/tty || reply=""
     case "$reply" in
-        n|N|no|NO|No) assume_yes=0 ;;
-        *)            assume_yes=1 ;;
+        n|N|no|NO|No) echo "aborted." >&2; exit 1 ;;
+        *) ;;
     esac
 else
-    echo ".. no tty available; skipping global symlinks (set ROCUP_ASSUME_YES=1 to force)"
+    echo "error: no tty available; set ROCUP_ASSUME_YES=1 to install non-interactively" >&2
+    exit 1
 fi
 
 mkdir -p "$ROCUP_HOME"
@@ -44,5 +51,5 @@ curl -fsSL "$RAW_URL" -o "$ROCUP_HOME/rocup"
 chmod +x "$ROCUP_HOME/rocup"
 echo ".. installed rocup at $ROCUP_HOME/rocup"
 
-ROCUP_ASSUME_YES="$assume_yes" ROCUP_HOME="$ROCUP_HOME" ROCUP_PREFIX="$ROCUP_PREFIX" \
+ROCUP_ASSUME_YES=1 ROCUP_HOME="$ROCUP_HOME" ROCUP_PREFIX="$ROCUP_PREFIX" \
     exec "$ROCUP_HOME/rocup" latest

@@ -17,9 +17,9 @@ On macOS and Linux:
 curl -fsSL https://raw.githubusercontent.com/imclerran/rocup/main/install.sh | sh
 ```
 
-The installer downloads `rocup` into `~/.rocup/rocup`, installs the latest Roc nightly, and (with your consent) symlinks `rocup`, `roc`, and `roc_language_server` into `/usr/local/bin` so they're on your `PATH`. It will use `sudo` if writing to `/usr/local/bin` requires it.
+The installer asks for confirmation up front. If you accept, it downloads `rocup` into `~/.rocup/rocup`, installs the latest Roc nightly, and symlinks `rocup`, `roc`, and `roc_language_server` into `/usr/local/bin` so they're on your `PATH`. It will use `sudo` if writing to `/usr/local/bin` requires it. If you decline, the installer aborts before downloading anything.
 
-To skip the consent prompt (e.g. in CI), set `ROCUP_ASSUME_YES=1` before piping to `sh`.
+To skip the prompt (e.g. in CI), set `ROCUP_ASSUME_YES=1` before piping to `sh`.
 
 Or clone and run manually:
 
