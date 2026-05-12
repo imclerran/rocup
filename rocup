@@ -438,15 +438,20 @@ find_nightly_dir() {
 
 # dir_sort_key <full-dir-path>
 # Echoes a YYYY-MM-DD sort key for any rocup-managed dir. New-format nightly
-# dirs (roc_nightly-YYYY-MM-DD-<hash>) use the embedded date. Old-format
-# nightlies, alpha4, and local-* fall back to the dir's mtime formatted as
-# YYYY-MM-DD, so all keys live in the same lexicographic space.
+# dirs (roc_nightly-YYYY-MM-DD-<hash>) use the embedded date. alpha4 is pinned
+# to 0000-00-00 so it always sorts before any nightly. Old-format nightlies
+# and local-* fall back to the dir's mtime formatted as YYYY-MM-DD, so all
+# keys live in the same lexicographic space.
 dir_sort_key() {
     local dir="$1"
     local name
     name=$(basename "$dir")
     if [[ "$name" =~ ^roc_nightly-([0-9]{4})-([0-9]{2})-([0-9]{2})-[0-9a-f]{7}$ ]]; then
         echo "${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+        return 0
+    fi
+    if [ "$name" = "roc-alpha4-rolling" ]; then
+        echo "0000-00-00"
         return 0
     fi
     local epoch
