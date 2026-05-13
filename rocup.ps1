@@ -1,0 +1,833 @@
+#requires -version 5.1
+
+<#
+rocup - Roc compiler version manager for Windows.
+Mirrors the bash 'rocup' script function-for-function where possible.
+See docs/superpowers/specs/2026-05-13-rocup-windows-port-design.md for design notes.
+#>
+
+[CmdletBinding()]
+param(
+    [Parameter(Position=0, ValueFromRemainingArguments=$true)]
+    [string[]] $Args = @()
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 2.0
+
+# --- Configuration --------------------------------------------------------
+
+$script:RocupHome = if ($env:ROCUP_HOME) {
+    $env:ROCUP_HOME
+} elseif ($env:USERPROFILE) {
+    Join-Path $env:USERPROFILE '.rocup'
+} else {
+    # Allow the script to load on non-Windows hosts (e.g. CI's drift-check
+    # invoking `pwsh --help` to inspect the command surface). Any function
+    # that actually touches the filesystem will fail at the operation site
+    # rather than crash before usage can print.
+    $null
+}
+
+# --- Platform detection ---------------------------------------------------
+
+function Get-Platform {
+    # PROCESSOR_ARCHITEW6432 is set on WOW64 (32-bit process on 64-bit OS) and
+    # holds the OS arch; otherwise PROCESSOR_ARCHITECTURE does. Both are always
+    # set by Windows, with no dependency on the .NET Framework version.
+    $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+    switch ($arch) {
+        'AMD64' { 'windows_x86_64' }
+        'ARM64' { 'windows_arm64' }
+        default { throw "error: unsupported Windows architecture: $arch" }
+    }
+}
+
+# --- Core helpers ---------------------------------------------------------
+
+function Get-Mtime {
+    param([Parameter(Mandatory)][string] $Path)
+    (Get-Item -LiteralPath $Path).LastWriteTime.ToFileTimeUtc()
+}
+
+function Convert-MonthNameToNumber {
+    param([Parameter(Mandatory)][string] $Name)
+    switch ($Name) {
+        { $_ -in 'Jan','January' }      { return '01' }
+        { $_ -in 'Feb','February' }     { return '02' }
+        { $_ -in 'Mar','March' }        { return '03' }
+        { $_ -in 'Apr','April' }        { return '04' }
+        'May'                           { return '05' }
+        { $_ -in 'Jun','June' }         { return '06' }
+        { $_ -in 'Jul','July' }         { return '07' }
+        { $_ -in 'Aug','August' }       { return '08' }
+        { $_ -in 'Sep','September' }    { return '09' }
+        { $_ -in 'Oct','October' }      { return '10' }
+        { $_ -in 'Nov','November' }     { return '11' }
+        { $_ -in 'Dec','December' }     { return '12' }
+        default { throw "error: unknown month name '$Name'" }
+    }
+}
+
+function ConvertFrom-NightlyTag {
+    param([Parameter(Mandatory)][string] $Tag)
+    # Tag format: nightly-YYYY-Mmm-DD-<hash>
+    $parts = $Tag -split '-'
+    if ($parts.Count -lt 5 -or $parts[0] -ne 'nightly') {
+        throw "error: unexpected nightly tag format: $Tag"
+    }
+    $year = $parts[1]
+    $monName = $parts[2]
+    $day = $parts[3]
+    $monNum = Convert-MonthNameToNumber $monName
+    "$year-$monNum-$day"
+}
+
+function Get-DirSortKey {
+    param([Parameter(Mandatory)][string] $Dir)
+    $name = Split-Path -Leaf $Dir
+    if ($name -match '^roc_nightly-([0-9]{4})-([0-9]{2})-([0-9]{2})-[0-9a-f]{7}$') {
+        return "$($Matches[1])-$($Matches[2])-$($Matches[3])"
+    }
+    $mtime = (Get-Item -LiteralPath $Dir).LastWriteTime
+    $mtime.ToString('yyyy-MM-dd')
+}
+
+function Get-Sha256Hex {
+    param([Parameter(Mandatory)][string] $Text)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
+        ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) -join ''
+    }
+    finally { $sha.Dispose() }
+}
+
+function Find-NightlyDir {
+    param([Parameter(Mandatory)][string] $Hash)
+    if (-not (Test-Path -LiteralPath $script:RocupHome -PathType Container)) { return '' }
+    # Prefer new-format: roc_nightly-YYYY-MM-DD-<hash>
+    $found = Get-ChildItem -LiteralPath $script:RocupHome -Directory -Filter "roc_nightly-*-$Hash" -ErrorAction SilentlyContinue |
+             Select-Object -First 1
+    if ($found) { return $found.Name }
+    # Legacy: roc_nightly-<hash>
+    $legacy = Join-Path $script:RocupHome "roc_nightly-$Hash"
+    if (Test-Path -LiteralPath $legacy) { return "roc_nightly-$Hash" }
+    return ''
+}
+
+function Get-LocalInstallPath {
+    param([Parameter(Mandatory)][string] $EntryPath)
+    $item = Get-Item -LiteralPath $EntryPath -Force -ErrorAction SilentlyContinue
+    if (-not $item) { return '' }
+    if ($item.LinkType -eq 'Junction' -or $item.LinkType -eq 'SymbolicLink') {
+        return $item.Target | Select-Object -First 1
+    }
+    # File-mode local entries (Unix-style) don't apply on Windows, but if some
+    # unusual state exists where local-<hash> is a real dir, return its path.
+    return $item.FullName
+}
+
+# --- Junction management --------------------------------------------------
+
+function Test-IsJunction {
+    param([Parameter(Mandatory)][string] $Path)
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $item) { return $false }
+    return $item.LinkType -eq 'Junction'
+}
+
+function New-RocupJunction {
+    param(
+        [Parameter(Mandatory)][string] $LinkPath,
+        [Parameter(Mandatory)][string] $TargetDir
+    )
+    # Cross-volume detection - junctions only work on the same NTFS volume.
+    $linkRoot = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($LinkPath))
+    $targetRoot = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($TargetDir))
+    if ($linkRoot -ne $targetRoot) {
+        throw "error: cannot create junction from $LinkPath ($linkRoot) to $TargetDir ($targetRoot): cross-volume junctions are not supported. Set `$env:ROCUP_HOME to a directory on $targetRoot and retry, or move the build to $linkRoot."
+    }
+    New-Item -ItemType Junction -Path $LinkPath -Value $TargetDir -Force | Out-Null
+}
+
+function Remove-Junction {
+    param([Parameter(Mandatory)][string] $Path)
+    # Remove a junction without prompting and without touching its target.
+    # PowerShell 5.1's Remove-Item prompts for confirmation on a junction whose
+    # target has children, even with -Force. If the user (or harness) confirms,
+    # -Recurse would follow the junction and delete the user's actual build
+    # directory contents. The .NET API deletes the reparse-point entry only.
+    [System.IO.Directory]::Delete($Path, $false)
+}
+
+function Set-ActiveVersion {
+    param([Parameter(Mandatory)][string] $DirName)
+    $targetDir = Join-Path $script:RocupHome $DirName
+
+    if ((Test-Path -LiteralPath $targetDir) -and -not (Test-Path -LiteralPath $targetDir -PathType Container)) {
+        throw "error: $targetDir exists but is not a directory; cannot activate"
+    }
+    if (-not (Test-Path -LiteralPath $targetDir -PathType Container)) {
+        # Could also be a dangling junction whose target was deleted.
+        $item = Get-Item -LiteralPath $targetDir -Force -ErrorAction SilentlyContinue
+        if ($item -and $item.LinkType -eq 'Junction') {
+            throw "error: $targetDir is a dangling junction (the local source directory has been moved or deleted)"
+        }
+        throw "error: $targetDir does not exist; cannot activate"
+    }
+
+    $rocLink = Join-Path $script:RocupHome 'roc'
+
+    # Safety: if $rocLink exists and ISN'T a junction, refuse to delete it.
+    if (Test-Path -LiteralPath $rocLink) {
+        if (-not (Test-IsJunction $rocLink)) {
+            throw "error: $rocLink exists but is not a junction - refusing to delete. Remove it manually if you want rocup to manage it."
+        }
+        Remove-Junction $rocLink
+    }
+
+    New-RocupJunction -LinkPath $rocLink -TargetDir $targetDir
+    Write-Host ".. active version: $DirName"
+    $rocExe = Join-Path $targetDir 'roc.exe'
+    if (Test-Path -LiteralPath $rocExe -PathType Leaf) {
+        Write-Host ".. roc binary: $rocExe"
+    }
+}
+
+function Remove-DanglingJunction {
+    param([Parameter(Mandatory)][string] $Path)
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $item) { return }
+    if ($item.LinkType -ne 'Junction') { return }
+    # Junction with a missing target is "dangling" - Test-Path on the link returns true,
+    # but Test-Path on the target returns false.
+    $target = $item.Target | Select-Object -First 1
+    if ($target -and -not (Test-Path -LiteralPath $target)) {
+        Remove-Junction $Path
+        Write-Host ".. cleaned up dangling $Path"
+    }
+}
+
+function Remove-DanglingJunctions {
+    Remove-DanglingJunction (Join-Path $script:RocupHome 'roc')
+}
+
+function Add-UserPathEntry {
+    param([Parameter(Mandatory)][string] $Dir)
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $entries = if ($userPath) { $userPath -split ';' | Where-Object { $_ } } else { @() }
+    if ($entries -contains $Dir) { return $false }
+    $entries += $Dir
+    [Environment]::SetEnvironmentVariable('Path', ($entries -join ';'), 'User')
+    Write-Host ".. added $Dir to User PATH"
+    return $true
+}
+
+function Initialize-RocupShims {
+    # Ensure $RocupHome\bin and $RocupHome\roc are on User PATH. Idempotent.
+    # Bin shims themselves are installed by install.ps1, not from here.
+    $binDir = Join-Path $script:RocupHome 'bin'
+    $rocDir = Join-Path $script:RocupHome 'roc'
+    $null = Add-UserPathEntry $binDir
+    $null = Add-UserPathEntry $rocDir
+}
+
+# --- GitHub API ----------------------------------------------------------
+
+function Get-RecentTags {
+    param(
+        [Parameter(Mandatory)][string] $Repo,
+        [Parameter(Mandatory)][int] $Count
+    )
+    # Test hook: force the empty-tags response so callers exercise the
+    # offline / installed-only fallback path. Used by 11-step-offline.ps1.
+    if ($env:ROCUP_TEST_OFFLINE -eq '1') { return @() }
+    # GitHub REST silently caps per_page at 100; paginate when count > 100.
+    $pagesNeeded = [Math]::Max(1, [Math]::Ceiling($Count / 100.0))
+    $tags = @()
+    $oldProgress = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        for ($page = 1; $page -le $pagesNeeded; $page++) {
+            $url = "https://api.github.com/repos/$Repo/releases?per_page=100&page=$page"
+            try {
+                $releases = @(Invoke-RestMethod -Uri $url -UseBasicParsing -Headers @{ 'User-Agent' = 'rocup' })
+            }
+            catch {
+                throw "error: failed to fetch releases for $Repo (page $page): $($_.Exception.Message)"
+            }
+            foreach ($r in $releases) {
+                if ($r.tag_name) { $tags += $r.tag_name }
+            }
+            if ($releases.Count -lt 100) { break }
+        }
+    }
+    finally { $ProgressPreference = $oldProgress }
+    $tags
+}
+
+function Resolve-LatestHash {
+    $tags = @(Get-RecentTags -Repo 'roc-lang/nightlies' -Count 1)
+    if (-not $tags -or $tags.Count -eq 0) {
+        throw "error: could not find any nightly releases in roc-lang/nightlies"
+    }
+    $tag = $tags[0]
+    $hash = $tag.Split('-')[-1]
+    if ($hash -notmatch '^[0-9a-f]{7}$') {
+        throw "error: latest release tag '$tag' did not end in a 7-char hash"
+    }
+    $hash
+}
+
+function Get-NightlyAsset {
+    param(
+        [Parameter(Mandatory)][string] $Tag,
+        [Parameter(Mandatory)][string] $Platform,
+        [Parameter(Mandatory)][string] $Hash,
+        [Parameter(Mandatory)][string] $DestDir
+    )
+    $dateYmd = ConvertFrom-NightlyTag $Tag
+    $tHash = $Tag.Split('-')[-1]
+    $asset = "roc_nightly-$Platform-$dateYmd-$tHash.zip"
+    $url = "https://github.com/roc-lang/nightlies/releases/download/$Tag/$asset"
+    $out = Join-Path $DestDir $asset
+    $oldProgress = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
+    }
+    catch { throw "error: download failed: $url" }
+    finally { $ProgressPreference = $oldProgress }
+    if (-not (Test-Path -LiteralPath $out)) { throw "error: download did not produce $out" }
+    $out
+}
+
+# --- Install ---------------------------------------------------------------
+
+function Expand-RocArchive {
+    # Extract $ZipPath into $TargetDir, emulating tar's --strip-components=1.
+    # The Roc archive always has a single top-level directory; we want its
+    # contents directly inside $TargetDir.
+    param(
+        [Parameter(Mandatory)][string] $ZipPath,
+        [Parameter(Mandatory)][string] $TargetDir
+    )
+    $tmpExtract = Join-Path ([IO.Path]::GetTempPath()) ("rocup-extract-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmpExtract -Force | Out-Null
+    try {
+        $oldProgress = $ProgressPreference
+        $ProgressPreference = 'SilentlyContinue'
+        try {
+            Expand-Archive -LiteralPath $ZipPath -DestinationPath $tmpExtract -Force
+        }
+        finally { $ProgressPreference = $oldProgress }
+
+        $entries = @(Get-ChildItem -LiteralPath $tmpExtract -Force)
+        if ($entries.Count -eq 1 -and $entries[0].PSIsContainer) {
+            # Single top-level directory - flatten by moving its contents.
+            New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
+            Get-ChildItem -LiteralPath $entries[0].FullName -Force | ForEach-Object {
+                Move-Item -LiteralPath $_.FullName -Destination $TargetDir -Force
+            }
+        } else {
+            # Multiple top-level entries - move them all directly.
+            New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
+            $entries | ForEach-Object {
+                Move-Item -LiteralPath $_.FullName -Destination $TargetDir -Force
+            }
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $tmpExtract) {
+            Remove-Item -LiteralPath $tmpExtract -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Install-Nightly {
+    param(
+        [Parameter(Mandatory)][string] $Hash,
+        [Parameter(Mandatory)][string] $Platform
+    )
+    New-Item -ItemType Directory -Path $script:RocupHome -Force | Out-Null
+
+    # Short-circuit if already installed.
+    $existing = Find-NightlyDir $Hash
+    if ($existing) {
+        $existingExe = Join-Path (Join-Path $script:RocupHome $existing) 'roc.exe'
+        if (Test-Path -LiteralPath $existingExe) {
+            Write-Host ".. nightly $Hash already extracted at $script:RocupHome\$existing; skipping download"
+            Set-ActiveVersion $existing
+            return
+        }
+    }
+
+    Write-Host ".. looking up nightly release with hash $Hash"
+    $tags = Get-RecentTags -Repo 'roc-lang/nightlies' -Count 200
+    $tag = $tags | Where-Object { $_.EndsWith("-$Hash") } | Select-Object -First 1
+    if (-not $tag) {
+        throw "error: no nightly release with hash '$Hash' found in roc-lang/nightlies"
+    }
+    Write-Host ".. found release: $tag"
+
+    $dateYmd = ConvertFrom-NightlyTag $tag
+    $dirName = "roc_nightly-$dateYmd-$Hash"
+    $targetDir = Join-Path $script:RocupHome $dirName
+
+    $downloadDir = Join-Path ([IO.Path]::GetTempPath()) ("rocup-nightly-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
+    try {
+        Write-Host ".. downloading nightly asset for $Platform"
+        $zip = Get-NightlyAsset -Tag $tag -Platform $Platform -Hash $Hash -DestDir $downloadDir
+
+        Write-Host ".. extracting"
+        try {
+            Expand-RocArchive -ZipPath $zip -TargetDir $targetDir
+        }
+        catch {
+            if (Test-Path -LiteralPath $targetDir) { Remove-Item -LiteralPath $targetDir -Recurse -Force -ErrorAction SilentlyContinue }
+            throw "error: extract failed: $($_.Exception.Message)"
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $downloadDir) {
+            Remove-Item -LiteralPath $downloadDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    Set-ActiveVersion $dirName
+}
+
+# --- Top-level command handlers ------------------------------------------
+
+function Invoke-Latest {
+    $platform = Get-Platform
+    $hash = Resolve-LatestHash
+    Write-Host ".. latest nightly hash: $hash"
+    Install-Nightly -Hash $hash -Platform $platform
+    Initialize-RocupShims
+}
+
+function Invoke-HashDispatch {
+    param([Parameter(Mandatory)][string] $RawHash)
+    $hash = $RawHash.Substring(0, 7)
+    $localDir = Join-Path $script:RocupHome "local-$hash"
+    if (Test-Path -LiteralPath $localDir) {
+        Write-Host ".. activating local-$hash"
+        Set-ActiveVersion "local-$hash"
+    } else {
+        $platform = Get-Platform
+        Install-Nightly -Hash $hash -Platform $platform
+    }
+    Initialize-RocupShims
+}
+
+function Get-FallbackVersion {
+    # Pick the most recent nightly to fall back to; else most recent local.
+    # Returns the directory name (e.g. 'roc_nightly-2025-10-25-2b89aee') or ''.
+    $dirs = @(Get-InstalledVersionDirs)
+    if ($dirs.Count -eq 0) { return '' }
+    $nightlies = @($dirs | Where-Object { $_.Name -like 'roc_nightly-*' })
+    if ($nightlies.Count -gt 0) {
+        $best = $nightlies | Sort-Object { Get-DirSortKey $_.FullName } -Descending | Select-Object -First 1
+        return $best.Name
+    }
+    $locals = @($dirs | Where-Object { $_.Name -like 'local-*' })
+    if ($locals.Count -gt 0) {
+        $best = $locals | Sort-Object { Get-DirSortKey $_.FullName } -Descending | Select-Object -First 1
+        return $best.Name
+    }
+    return ''
+}
+
+function Remove-Version {
+    param([Parameter(Mandatory)][string] $Ver)
+
+    $dirName = $null
+    switch -Regex ($Ver) {
+        '^local-[0-9a-f]{7}$' { $dirName = $Ver }
+        '^[0-9a-f]{7,8}$' {
+            $hash = $Ver.Substring(0, 7)
+            $localDir = Join-Path $script:RocupHome "local-$hash"
+            if (Test-Path -LiteralPath $localDir) {
+                $dirName = "local-$hash"
+            } else {
+                $found = Find-NightlyDir $hash
+                if ($found) { $dirName = $found }
+                else        { $dirName = "roc_nightly-$hash" }
+            }
+        }
+        default {
+            throw "error: invalid version '$Ver' (expected 7- or 8-char hash, or 'local-<hash>')"
+        }
+    }
+
+    $targetDir = Join-Path $script:RocupHome $dirName
+    if (-not (Test-Path -LiteralPath $targetDir)) {
+        $item = Get-Item -LiteralPath $targetDir -Force -ErrorAction SilentlyContinue
+        if (-not $item) {
+            throw "error: $targetDir does not exist; nothing to remove"
+        }
+    }
+
+    $rocLink = Join-Path $script:RocupHome 'roc'
+    $wasActive = $false
+    if (Test-IsJunction $rocLink) {
+        $linkTarget = (Get-Item -LiteralPath $rocLink -Force).Target | Select-Object -First 1
+        if ($linkTarget -and ((Split-Path -Leaf $linkTarget) -eq $dirName)) {
+            $wasActive = $true
+        }
+    }
+
+    Write-Host ".. removing $targetDir"
+    if (Test-IsJunction $targetDir) {
+        # local-<hash> entries are junctions; delete the entry only, never
+        # follow into the user's source build dir.
+        Remove-Junction $targetDir
+    } else {
+        Remove-Item -LiteralPath $targetDir -Recurse -Force
+    }
+
+    if (-not $wasActive) { return }
+
+    $fallback = Get-FallbackVersion
+    if ($fallback) {
+        Set-ActiveVersion $fallback
+    } else {
+        if (Test-IsJunction $rocLink) { Remove-Junction $rocLink }
+        Write-Host ".. no remaining versions; removed $rocLink junction"
+        Remove-DanglingJunctions
+    }
+}
+
+function Invoke-Prune {
+    param([Parameter(Mandatory)][string] $KeepRaw)
+    if ($KeepRaw -notmatch '^[0-9]+$') {
+        throw "error: prune count must be a non-negative integer (got '$KeepRaw')"
+    }
+    $keep = [int] $KeepRaw
+
+    if (-not (Test-Path -LiteralPath $script:RocupHome -PathType Container)) {
+        Write-Host "no nightlies installed (no $script:RocupHome)"
+        return
+    }
+
+    $rocLink = Join-Path $script:RocupHome 'roc'
+    $active = ''
+    if (Test-IsJunction $rocLink) {
+        $target = (Get-Item -LiteralPath $rocLink -Force).Target | Select-Object -First 1
+        if ($target) { $active = Split-Path -Leaf $target }
+    }
+
+    $nightlies = @(Get-InstalledVersionDirs | Where-Object { $_.Name -like 'roc_nightly-*' })
+    if ($nightlies.Count -eq 0) {
+        Write-Host "no nightlies to prune"
+        return
+    }
+
+    $sorted = $nightlies | Sort-Object { Get-DirSortKey $_.FullName } -Descending
+
+    $pos = 0
+    $removed = 0
+    foreach ($n in $sorted) {
+        $pos += 1
+        if ($pos -le $keep) {
+            if ($n.Name -eq $active) { Write-Host "    keep $($n.Name) (active)" }
+            else                     { Write-Host "    keep $($n.Name)" }
+        } elseif ($n.Name -eq $active) {
+            Write-Host "    keep $($n.Name) (active)"
+        } else {
+            Write-Host "  remove $($n.Name)"
+            Remove-Item -LiteralPath $n.FullName -Recurse -Force
+            $removed += 1
+        }
+    }
+    Write-Host ".. pruned $removed nightlies"
+}
+
+function Step-Nightly {
+    param([Parameter(Mandatory)][string] $Raw)
+    if ($Raw -notmatch '^[+-][0-9]+$') {
+        throw "error: invalid step '$Raw' (expected +N or -N where N > 0)"
+    }
+    $sign = $Raw.Substring(0, 1)
+    $n = [int] $Raw.Substring(1)
+    if ($n -eq 0) {
+        throw "error: invalid step '$Raw' (N must be a positive integer)"
+    }
+
+    $rocLink = Join-Path $script:RocupHome 'roc'
+    if (-not (Test-IsJunction $rocLink)) {
+        throw "error: no active version; use 'rocup latest' first."
+    }
+    $activeTarget = (Get-Item -LiteralPath $rocLink -Force).Target | Select-Object -First 1
+    $active = Split-Path -Leaf $activeTarget
+
+    if ($active -notlike 'roc_nightly-*') {
+        if ($active -like 'local-*') {
+            throw "error: +N/-N requires an active nightly; $active is active. Use 'rocup latest' or a specific hash to switch."
+        }
+        throw "error: +N/-N requires an active nightly; $active is active."
+    }
+
+    $activeHash = $active.Split('-')[-1]
+    if ($activeHash -notmatch '^[0-9a-f]{7}$') {
+        throw "error: could not parse active nightly hash from '$active'"
+    }
+
+    Write-Host ".. stepping $Raw from $activeHash"
+
+    try {
+        $tags = @(Get-RecentTags -Repo 'roc-lang/nightlies' -Count 200)
+        if ($tags.Count -gt 0) {
+            Step-NightlyViaTags -Sign $sign -N $n -ActiveHash $activeHash -Tags $tags
+            return
+        }
+    } catch {
+        Write-Host ".. network unavailable; using installed nightlies only"
+    }
+
+    Step-NightlyViaInstalled -Sign $sign -N $n -Active $active
+}
+
+function Step-NightlyViaTags {
+    param(
+        [Parameter(Mandatory)][string] $Sign,
+        [Parameter(Mandatory)][int] $N,
+        [Parameter(Mandatory)][string] $ActiveHash,
+        [Parameter(Mandatory)][string[]] $Tags
+    )
+    $i = -1
+    for ($idx = 0; $idx -lt $Tags.Count; $idx++) {
+        if ($Tags[$idx].EndsWith("-$ActiveHash")) { $i = $idx; break }
+    }
+    if ($i -lt 0) {
+        throw "error: active nightly $ActiveHash is older than the most recent 200 releases; relative navigation is not supported from here. Use 'rocup latest' or a specific hash."
+    }
+
+    if ($Sign -eq '+') {
+        $targetIdx = $i - $N
+        if ($targetIdx -lt 0) { throw "error: only $i nightlies newer than active; cannot step +$N." }
+    } else {
+        $targetIdx = $i + $N
+        if ($targetIdx -ge $Tags.Count) {
+            $available = $Tags.Count - $i - 1
+            throw "error: only $available nightlies older than active in the most recent 200; cannot step -$N."
+        }
+    }
+
+    $targetTag = $Tags[$targetIdx]
+    Write-Host ".. target: $targetTag"
+    $targetHash = $targetTag.Split('-')[-1]
+    $platform = Get-Platform
+    Install-Nightly -Hash $targetHash -Platform $platform
+}
+
+function Step-NightlyViaInstalled {
+    param(
+        [Parameter(Mandatory)][string] $Sign,
+        [Parameter(Mandatory)][int] $N,
+        [Parameter(Mandatory)][string] $Active
+    )
+    if (-not (Test-Path -LiteralPath $script:RocupHome -PathType Container)) {
+        throw "error: no installed nightlies (offline; only installed nightlies considered)"
+    }
+    $nightlies = @(Get-InstalledVersionDirs | Where-Object { $_.Name -like 'roc_nightly-*' })
+    if ($nightlies.Count -eq 0) {
+        throw "error: no installed nightlies (offline; only installed nightlies considered)"
+    }
+    $sorted = $nightlies | Sort-Object { Get-DirSortKey $_.FullName } -Descending
+    $names = @($sorted | ForEach-Object { $_.Name })
+
+    $i = -1
+    for ($idx = 0; $idx -lt $names.Count; $idx++) {
+        if ($names[$idx] -eq $Active) { $i = $idx; break }
+    }
+    if ($i -lt 0) {
+        throw "error: active nightly $Active not found among installed dirs"
+    }
+
+    if ($Sign -eq '+') {
+        $targetIdx = $i - $N
+        if ($targetIdx -lt 0) { throw "error: only $i installed nightlies newer than active; cannot step +$N (offline; only installed nightlies considered)." }
+    } else {
+        $targetIdx = $i + $N
+        if ($targetIdx -ge $names.Count) {
+            $available = $names.Count - $i - 1
+            throw "error: only $available installed nightlies older than active; cannot step -$N (offline; only installed nightlies considered)."
+        }
+    }
+
+    $target = $names[$targetIdx]
+    Write-Host ".. target: $target"
+    Set-ActiveVersion $target
+}
+
+function Register-Local {
+    param([Parameter(Mandatory)][string] $InputPath)
+
+    if (-not (Test-Path -LiteralPath $InputPath)) {
+        throw "error: $InputPath does not exist"
+    }
+    if (-not (Test-Path -LiteralPath $InputPath -PathType Container)) {
+        throw "error: Windows port requires a directory; pass the directory containing roc.exe instead of a file path"
+    }
+
+    $absPath = (Resolve-Path -LiteralPath $InputPath).Path
+    $rocExe = Join-Path $absPath 'roc.exe'
+    if (-not (Test-Path -LiteralPath $rocExe -PathType Leaf)) {
+        throw "error: no roc.exe found in $absPath"
+    }
+
+    New-Item -ItemType Directory -Path $script:RocupHome -Force | Out-Null
+
+    $hash = (Get-Sha256Hex $absPath).Substring(0, 7)
+    $dirName = "local-$hash"
+    $entry = Join-Path $script:RocupHome $dirName
+
+    if (Test-Path -LiteralPath $entry) {
+        Write-Host ".. $dirName already registered ($absPath)"
+    } else {
+        New-RocupJunction -LinkPath $entry -TargetDir $absPath
+        Write-Host ".. registered $dirName -> $absPath"
+    }
+
+    Set-ActiveVersion $dirName
+}
+
+# --- List -----------------------------------------------------------------
+
+function Get-InstalledVersionDirs {
+    # Returns DirectoryInfo objects for everything rocup tracks under $RocupHome.
+    # Excludes 'roc' (the active-version junction) and 'bin' (shim dir).
+    if (-not (Test-Path -LiteralPath $script:RocupHome -PathType Container)) { return @() }
+    Get-ChildItem -LiteralPath $script:RocupHome -Force -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.PSIsContainer -or $_.LinkType -eq 'Junction'
+        } |
+        Where-Object {
+            $_.Name -like 'roc_nightly-*' -or $_.Name -like 'local-*'
+        }
+}
+
+function Invoke-List {
+    if (-not (Test-Path -LiteralPath $script:RocupHome -PathType Container)) {
+        Write-Host "no versions installed (no $script:RocupHome)"
+        return
+    }
+
+    $rocLink = Join-Path $script:RocupHome 'roc'
+    $active = ''
+    if (Test-IsJunction $rocLink) {
+        $target = (Get-Item -LiteralPath $rocLink -Force).Target | Select-Object -First 1
+        if ($target) { $active = Split-Path -Leaf $target }
+    }
+
+    $dirs = @(Get-InstalledVersionDirs)
+    if ($dirs.Count -eq 0) {
+        Write-Host "no versions installed in $script:RocupHome"
+        return
+    }
+
+    $rows = $dirs | ForEach-Object {
+        [PSCustomObject]@{
+            SortKey = Get-DirSortKey $_.FullName
+            Name    = $_.Name
+            Path    = $_.FullName
+        }
+    } | Sort-Object SortKey
+
+    foreach ($row in $rows) {
+        $marker = if ($row.Name -eq $active) { ' -> ' } else { '    ' }
+        if ($row.Name -like 'local-*') {
+            $target = Get-LocalInstallPath $row.Path
+            Write-Host ("{0}{1,-22}  {2}" -f $marker, $row.Name, $target)
+        } else {
+            Write-Host ("{0}{1}" -f $marker, $row.Name)
+        }
+    }
+}
+
+# --- Usage ----------------------------------------------------------------
+
+function Show-Usage {
+    @'
+usage: rocup [latest | <hash> | <path> | +N | -N | list | remove <ver> | prune <N>]
+
+  latest          install/activate the most recent nightly from roc-lang/nightlies
+                  (default if no arg)
+
+  <hash>          7- or 8-char hex (8-char matches 'roc --version' output, which
+                  is then truncated to 7 to look up GitHub releases). If a local
+                  install with that hash is registered, activate it. Else if the
+                  nightly is already downloaded, activate it. Else fetch the
+                  nightly from roc-lang/nightlies and install.
+
+  <path>          register a local roc as 'local-<hash>' inside $env:ROCUP_HOME
+                  (via junction, not copy). Path must be a directory containing
+                  roc.exe. File paths are not supported on Windows.
+
+  +N | -N         step N nightlies newer (+) or older (-) than the active one.
+                  Requires the active version to be a nightly.
+
+  list            show installed versions and mark the active one.
+
+  remove <ver>    delete a version (7- or 8-char hash, or local-<hash>).
+
+  prune <N>       keep the N most recent nightlies; delete older ones.
+'@
+}
+
+# --- Dispatch -------------------------------------------------------------
+
+function Invoke-Rocup {
+    param([string[]] $argv)
+
+    $cmd = if ($argv.Count -eq 0) { 'latest' } else { $argv[0] }
+
+    switch -Regex ($cmd) {
+        '^(-h|--help|help)$' { Show-Usage; return }
+        '^list$'             { Invoke-List; return }
+        '^remove$' {
+            if ($argv.Count -lt 2) {
+                throw "error: 'remove' requires an argument (7- or 8-char hash, or local-<hash>)"
+            }
+            Remove-Version $argv[1]
+            return
+        }
+        '^prune$' {
+            if ($argv.Count -lt 2) {
+                throw "error: 'prune' requires a count (e.g. 'rocup prune 3')"
+            }
+            Invoke-Prune $argv[1]
+            return
+        }
+        '^latest$'           { Invoke-Latest; return }
+        '^[+-][0-9]+$'       { Step-Nightly $cmd; Initialize-RocupShims; return }
+        '^[0-9a-f]{7,8}$'    { Invoke-HashDispatch $cmd; return }
+        default {
+            if (Test-Path -LiteralPath $cmd) {
+                Register-Local $cmd
+                Initialize-RocupShims
+                return
+            }
+            [Console]::Error.WriteLine("error: invalid argument '$cmd'")
+            [Console]::Error.WriteLine((Show-Usage))
+            exit 1
+        }
+    }
+}
+
+# --- Entry point ----------------------------------------------------------
+
+# Only run dispatch when invoked as a script, not when dot-sourced for testing.
+if ($MyInvocation.InvocationName -ne '.') {
+    try {
+        Invoke-Rocup -argv $Args
+    }
+    catch {
+        [Console]::Error.WriteLine($_.Exception.Message)
+        exit 1
+    }
+}

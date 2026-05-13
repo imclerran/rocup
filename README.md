@@ -21,6 +21,30 @@ The installer asks for confirmation up front. If you accept, it downloads `rocup
 
 To skip the prompt (e.g. in CI), set `ROCUP_ASSUME_YES=1` before piping to `sh`.
 
+To uninstall, run the matching one-liner. It removes the symlinks from `/usr/local/bin` and deletes `~/.rocup`, but does not touch the source directories behind any `local-*` registrations:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/imclerran/rocup/main/uninstall.sh | sh
+```
+
+On Windows (PowerShell):
+
+```ps1
+iwr -useb https://raw.githubusercontent.com/imclerran/rocup/main/install.ps1 | iex
+```
+
+Same UX as the macOS/Linux installer: prompts for confirmation, downloads `rocup.ps1` into `%USERPROFILE%\.rocup`, adds `~/.rocup\bin` and `~/.rocup\roc` to your User PATH, and installs the latest Roc nightly. Set `$env:ROCUP_ASSUME_YES = '1'` to skip the prompt.
+
+Restart your terminal after install so PATH updates take effect.
+
+To uninstall, run the matching one-liner. It removes the PATH entries and deletes `%USERPROFILE%\.rocup`, but does not touch the source directories behind any `local-*` registrations:
+
+```ps1
+iwr -useb https://raw.githubusercontent.com/imclerran/rocup/main/uninstall.ps1 | iex
+```
+
+**Note:** the Windows port supports nightlies and local-directory builds but not `alpha4` (no Windows binary released for it) and not single-file local registration (NTFS junctions are directory-only). See [FEATURE_MATRIX.md](FEATURE_MATRIX.md) for per-platform capability details.
+
 Or clone and run manually:
 
 ```sh
@@ -77,6 +101,7 @@ rocup prune 5                # keep the 5 most recent nightlies
 
 - macOS (Apple Silicon and x86_64)
 - Linux (x86_64 and arm64/aarch64)
+- Windows (x86_64 and arm64) — nightlies only; see [FEATURE_MATRIX.md](FEATURE_MATRIX.md)
 
 ## How it talks to GitHub
 

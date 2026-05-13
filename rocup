@@ -472,6 +472,11 @@ dir_sort_key() {
 # public repos) when gh is missing, unauthenticated, or returns no rows.
 fetch_recent_tags() {
     local repo="$1" count="$2"
+    # Test hook: force the empty-tags response so callers exercise the offline /
+    # installed-only fallback path. Used by 06-step-offline.sh.
+    if [ "${ROCUP_TEST_OFFLINE:-0}" = "1" ]; then
+        return 0
+    fi
     if command -v gh >/dev/null 2>&1; then
         local out
         if out=$(gh release list --repo "$repo" --limit "$count" \
