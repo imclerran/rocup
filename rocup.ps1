@@ -828,7 +828,8 @@ function Invoke-List {
 
 function Show-Usage {
     @'
-usage: rocup [latest | <hash> | <path> | local | +N | -N | list | remove <ver> | prune <N>]
+usage: rocup [latest | <hash> | <path> | local | +N | -N |
+              list | remove <ver> | prune <N>]
 
   latest          install/activate the most recent nightly from roc-lang/nightlies
                   (default if no arg)
