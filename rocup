@@ -61,10 +61,12 @@ detect_platform() {
 }
 
 mtime_of() {
-    if stat -f '%m' "$1" >/dev/null 2>&1; then
-        stat -f '%m' "$1"
+    # -L: follow symlinks so a registered local-<hash> reports the mtime of the
+    # actual install dir (e.g. zig-out/bin), not the symlink created at register time.
+    if stat -Lf '%m' "$1" >/dev/null 2>&1; then
+        stat -Lf '%m' "$1"
     else
-        stat -c '%Y' "$1"
+        stat -Lc '%Y' "$1"
     fi
 }
 
@@ -101,10 +103,22 @@ do_list() {
             marker=" -> "
         fi
         case "$name" in
+            roc-alpha4-rolling)
+                printf "%s%-7s (legacy)\n" "$marker" "alpha4"
+                ;;
+            roc_nightly-*)
+                if [[ "$name" =~ ^roc_nightly-([0-9]{4})-([0-9]{2})-([0-9]{2})-([0-9a-f]{7})$ ]]; then
+                    printf "%s%-7s (%s/%s/%s) <%s>\n" "$marker" "nightly" \
+                        "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[1]}" "${BASH_REMATCH[4]}"
+                else
+                    printf "%s%s\n" "$marker" "$name"
+                fi
+                ;;
             local-*)
-                local target
+                local target hash="${name#local-}" mdy
                 target=$(local_install_path "$dir")
-                printf "%s%-22s  %s\n" "$marker" "$name" "$target"
+                mdy=$(local_mdy "$dir")
+                printf "%s%-7s (%s) <%s>  %s\n" "$marker" "local" "$mdy" "$hash" "$target"
                 ;;
             *)
                 printf "%s%s\n" "$marker" "$name"
@@ -454,8 +468,14 @@ dir_sort_key() {
         echo "0000-00-00"
         return 0
     fi
-    local epoch
-    epoch=$(mtime_of "$dir")
+    # Prefer the roc binary's mtime: a dir's mtime only changes when entries
+    # are added/removed, so an in-place rebuild that overwrites $dir/roc
+    # wouldn't bump $dir's mtime. The binary itself is what we care about.
+    local epoch target="$dir/roc"
+    if [ ! -e "$target" ]; then
+        target="$dir"
+    fi
+    epoch=$(mtime_of "$target")
     if [ -z "$epoch" ]; then
         return 1
     fi
@@ -464,6 +484,19 @@ dir_sort_key() {
         return 0
     fi
     date -d "@$epoch" +%Y-%m-%d
+}
+
+# local_mdy <local-dir>
+# Echoes MM/DD/YYYY for a local-<hash> dir based on the roc binary's mtime
+# (falling back to the dir if the binary is missing). Used by `list`.
+local_mdy() {
+    local dir="$1"
+    local target="$dir/roc"
+    [ -e "$target" ] || target="$dir"
+    local epoch
+    epoch=$(mtime_of "$target") || { echo "??/??/????"; return; }
+    if date -r "$epoch" +%m/%d/%Y 2>/dev/null; then return; fi
+    date -d "@$epoch" +%m/%d/%Y
 }
 
 # fetch_recent_tags <repo> <count>
