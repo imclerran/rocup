@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# CI runners have internet, so the network-gated tests (those that hit real
+# GitHub for nightly metadata and downloads, run install.sh / install.ps1
+# end-to-end, etc.) run unconditionally here. Locally they're opt-in via
+# ROCUP_TEST_NETWORK=1.
+#
+# GITHUB_TOKEN authenticates the gh CLI path inside fetch_recent_tags so we
+# get the 5000/hr authenticated rate limit instead of the 60/hr unauthenticated
+# limit. Without this, parallel jobs hammering the API can hit 403s on the
+# curl fallback.
+env:
+  ROCUP_TEST_NETWORK: '1'
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run bash test suite
+        run: |
+          chmod +x rocup
+          for t in test/linux-macos/*.sh; do
+            echo "==> $t"
+            bash "$t"
+          done
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run bash test suite
+        run: |
+          chmod +x rocup
+          for t in test/linux-macos/*.sh; do
+            echo "==> $t"
+            bash "$t"
+          done
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run PowerShell test suite
+        shell: powershell
+        run: |
+          Get-ChildItem test\windows\*.ps1 | ForEach-Object {
+            Write-Host "==> $($_.Name)"
+            & $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "FAIL: $($_.Name)" }
+          }
+
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Drift check (command surface + usage text)
+        run: bash test/drift-check.sh
