@@ -35,10 +35,10 @@ KNOWN_PS_ONLY=""
 # Format: one per line, blank lines and '#'-prefixed comments ignored.
 REQUIRED_PHRASES=$(cat <<'EOF'
 # Synopsis - the canonical command-list fragment shown at the top of --help.
-# Both implementations expand to '[ ... | <hash> | <path> | +N | -N | list | ...]'.
+# Both implementations expand to '[ ... | <hash> | <path> | local | +N | -N | list | ...]'.
 # Bash's includes 'alpha4 |' as an extra leading option; the fragment below
 # starts at <hash> to match both.
-<hash> | <path> | +N | -N | list
+<hash> | <path> | local | +N | -N | list
 
 # 'latest' - default install/activate action.
 install/activate the most recent nightly
@@ -53,6 +53,11 @@ If a local install with that hash is registered, activate it
 
 # '<path>' - local registration.
 register a local roc
+
+# 'local' - activates the newest-mtime registered local build.
+activate a registered local roc build
+most recently built one
+Errors if no
 
 # '+N | -N' - relative stepping.
 step N nightlies newer

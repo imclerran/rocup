@@ -5,5 +5,6 @@ $r = Invoke-Rocup '--help'
 Assert-Contains $r.Output 'usage:' 'help shows usage'
 Assert-Contains $r.Output 'latest' 'help mentions latest'
 Assert-Contains $r.Output 'list'   'help mentions list'
+Assert-Contains $r.Output 'local'  'help mentions local'
 
 Write-TestPass
