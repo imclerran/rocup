@@ -272,6 +272,19 @@ function Get-RecentTags {
     # Test hook: force the empty-tags response so callers exercise the
     # offline / installed-only fallback path. Used by 11-step-offline.ps1.
     if ($env:ROCUP_TEST_OFFLINE -eq '1') { return @() }
+
+    # Prefer gh — it authenticates via GH_TOKEN/keyring, avoiding the 60-req/hr
+    # unauthenticated REST rate limit that bites CI runs from shared IPs.
+    # Falls through to Invoke-RestMethod when gh is absent, unauthenticated, or
+    # returns no rows. Mirrors fetch_recent_tags() in the bash port.
+    if (Get-Command gh -ErrorAction SilentlyContinue) {
+        $ghTags = @(& gh release list --repo $Repo --limit $Count `
+                        --json tagName --jq '.[].tagName' 2>$null)
+        $ghExit = $LASTEXITCODE
+        $global:LASTEXITCODE = 0
+        if ($ghExit -eq 0 -and $ghTags.Count -gt 0) { return $ghTags }
+    }
+
     # GitHub REST silently caps per_page at 100; paginate when count > 100.
     $pagesNeeded = [Math]::Max(1, [Math]::Ceiling($Count / 100.0))
     $tags = @()
@@ -284,7 +297,7 @@ function Get-RecentTags {
                 $releases = @(Invoke-RestMethod -Uri $url -UseBasicParsing -Headers @{ 'User-Agent' = 'rocup' })
             }
             catch {
-                throw "error: failed to fetch releases for $Repo (page $page): $($_.Exception.Message)"
+                throw "error: failed to fetch releases for $Repo (gh unavailable or unauthenticated, and REST request failed on page ${page}): $($_.Exception.Message)"
             }
             foreach ($r in $releases) {
                 if ($r.tag_name) { $tags += $r.tag_name }
@@ -319,8 +332,23 @@ function Get-NightlyAsset {
     $dateYmd = ConvertFrom-NightlyTag $Tag
     $tHash = $Tag.Split('-')[-1]
     $asset = "roc_nightly-$Platform-$dateYmd-$tHash.zip"
-    $url = "https://github.com/roc-lang/nightlies/releases/download/$Tag/$asset"
     $out = Join-Path $DestDir $asset
+
+    # Prefer gh release download — keeps the auth boundary consistent with
+    # Get-RecentTags and benefits from gh's transient-retry handling. The
+    # CDN-backed direct download is unauthenticated for public releases, so
+    # the fallback still works without credentials. Mirrors
+    # download_nightly_asset() in the bash port.
+    if (Get-Command gh -ErrorAction SilentlyContinue) {
+        $pattern = "roc_nightly-$Platform-*-$Hash.zip"
+        & gh release download $Tag --repo roc-lang/nightlies `
+            --pattern $pattern --dir $DestDir 2>$null
+        $ghExit = $LASTEXITCODE
+        $global:LASTEXITCODE = 0
+        if ($ghExit -eq 0 -and (Test-Path -LiteralPath $out)) { return $out }
+    }
+
+    $url = "https://github.com/roc-lang/nightlies/releases/download/$Tag/$asset"
     $oldProgress = $ProgressPreference
     $ProgressPreference = 'SilentlyContinue'
     try {
