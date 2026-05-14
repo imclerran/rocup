@@ -45,9 +45,29 @@ function Get-Platform {
 
 # --- Core helpers ---------------------------------------------------------
 
+function Resolve-LinkTarget {
+    # If $Path is a junction or symlink, return a Get-Item on its target so the
+    # caller sees the underlying directory's metadata (e.g. zig-out\bin's
+    # LastWriteTime) rather than the reparse point's, which is frozen at the
+    # time the link was created.
+    param([Parameter(Mandatory)][string] $Path)
+    $item = Get-Item -LiteralPath $Path
+    if ($item.LinkType -in 'Junction','SymbolicLink') {
+        $target = $item.Target | Select-Object -First 1
+        if ($target) {
+            if (-not [System.IO.Path]::IsPathRooted($target)) {
+                $target = Join-Path (Split-Path -Parent $Path) $target
+            }
+            $resolved = Get-Item -LiteralPath $target -ErrorAction SilentlyContinue
+            if ($resolved) { return $resolved }
+        }
+    }
+    $item
+}
+
 function Get-Mtime {
     param([Parameter(Mandatory)][string] $Path)
-    (Get-Item -LiteralPath $Path).LastWriteTime.ToFileTimeUtc()
+    (Resolve-LinkTarget $Path).LastWriteTime.ToFileTimeUtc()
 }
 
 function Convert-MonthNameToNumber {
@@ -89,7 +109,16 @@ function Get-DirSortKey {
     if ($name -match '^roc_nightly-([0-9]{4})-([0-9]{2})-([0-9]{2})-[0-9a-f]{7}$') {
         return "$($Matches[1])-$($Matches[2])-$($Matches[3])"
     }
-    $mtime = (Get-Item -LiteralPath $Dir).LastWriteTime
+    # Prefer the roc.exe binary's mtime: a dir's mtime only changes when
+    # entries are added/removed, so an in-place rebuild that overwrites
+    # roc.exe wouldn't bump the dir's mtime.
+    $resolved = Resolve-LinkTarget $Dir
+    $exe = Join-Path $resolved.FullName 'roc.exe'
+    if (Test-Path -LiteralPath $exe) {
+        $mtime = (Get-Item -LiteralPath $exe).LastWriteTime
+    } else {
+        $mtime = $resolved.LastWriteTime
+    }
     $mtime.ToString('yyyy-MM-dd')
 }
 
@@ -740,11 +769,33 @@ function Invoke-List {
 
     foreach ($row in $rows) {
         $marker = if ($row.Name -eq $active) { ' -> ' } else { '    ' }
-        if ($row.Name -like 'local-*') {
-            $target = Get-LocalInstallPath $row.Path
-            Write-Host ("{0}{1,-22}  {2}" -f $marker, $row.Name, $target)
-        } else {
-            Write-Host ("{0}{1}" -f $marker, $row.Name)
+        switch -Regex ($row.Name) {
+            '^roc-alpha4-rolling$' {
+                Write-Host ("{0}{1,-7} (legacy)" -f $marker, 'alpha4')
+                break
+            }
+            '^roc_nightly-([0-9]{4})-([0-9]{2})-([0-9]{2})-([0-9a-f]{7})$' {
+                $mdy = '{0}/{1}/{2}' -f $Matches[2], $Matches[3], $Matches[1]
+                Write-Host ("{0}{1,-7} ({2}) <{3}>" -f $marker, 'nightly', $mdy, $Matches[4])
+                break
+            }
+            '^local-([0-9a-f]{7})$' {
+                $hash = $Matches[1]
+                $target = Get-LocalInstallPath $row.Path
+                $resolved = Resolve-LinkTarget $row.Path
+                $exe = Join-Path $resolved.FullName 'roc.exe'
+                $mtime = if (Test-Path -LiteralPath $exe) {
+                    (Get-Item -LiteralPath $exe).LastWriteTime
+                } else {
+                    $resolved.LastWriteTime
+                }
+                $mdy = $mtime.ToString('MM/dd/yyyy')
+                Write-Host ("{0}{1,-7} ({2}) <{3}>  {4}" -f $marker, 'local', $mdy, $hash, $target)
+                break
+            }
+            default {
+                Write-Host ("{0}{1}" -f $marker, $row.Name)
+            }
         }
     }
 }
