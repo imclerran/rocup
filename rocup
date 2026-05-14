@@ -8,7 +8,7 @@ usage() {
     cat <<EOF
 usage: $0 [alpha4 | latest | <hash> | <path> | local | +N | -N | list | remove <ver> | prune <N>]
 
-  alpha4          install/activate the alpha4-rolling release
+  alpha4          install/activate the alpha4-rolling release. Alias: 'rust'.
 
   latest          install/activate the most recent nightly from roc-lang/nightlies
                   (default if no arg)
@@ -1040,7 +1040,7 @@ case "$cmd" in
         usage
         exit 0
         ;;
-    alpha4)
+    alpha4|rust)
         platform=$(detect_platform)
         install_alpha4 "$platform"
         ensure_global_symlinks
