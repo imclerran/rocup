@@ -6,7 +6,8 @@ ROCUP_HOME=${ROCUP_HOME:-$HOME/.rocup}
 
 usage() {
     cat <<EOF
-usage: $0 [alpha4 | latest | <hash> | <path> | local | +N | -N | list | remove <ver> | prune <N>]
+usage: rocup [alpha4 | latest | <hash> | <path> | local | +N | -N |
+              list | remove <ver> | prune <N>]
 
   alpha4          install/activate the alpha4-rolling release. Alias: 'rust'.
 
