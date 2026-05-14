@@ -826,38 +826,96 @@ function Invoke-List {
 
 # --- Usage ----------------------------------------------------------------
 
+# Get-TerminalWidth
+# Returns the column count to wrap --help output to. $env:COLUMNS always wins
+# (lets users and tests override). Otherwise read from $Host.UI.RawUI.WindowSize
+# — the PowerShell equivalent of the bash version's '/dev/tty' trick, which
+# returns the real console size regardless of whether the caller is capturing
+# stdout (Out-String, redirection, etc.). Falls back to 78 (the prior fixed
+# layout) when no console is attached. Clamped to [50, 120] so the layout
+# stays readable on both extremes.
+function Get-TerminalWidth {
+    $cols = 0
+    if ($env:COLUMNS -and ($env:COLUMNS -match '^\d+$')) {
+        $cols = [int] $env:COLUMNS
+    } else {
+        try { $cols = [int] $Host.UI.RawUI.WindowSize.Width } catch { $cols = 0 }
+    }
+    if ($cols -le 0)   { $cols = 78  }
+    if ($cols -gt 120) { $cols = 120 }
+    if ($cols -lt 50)  { $cols = 50  }
+    $cols
+}
+
+# Format-Wrapped
+# Word-wraps $Text to $Width columns. First line gets $FirstPrefix; subsequent
+# lines get $ContPrefix. Splits only on whitespace (never inside a word) so
+# multi-word phrases survive intact — required-phrase substring matching in
+# drift-check.sh depends on this. Returns a single string with embedded LFs.
+function Format-Wrapped {
+    param(
+        [int]    $Width,
+        [string] $FirstPrefix,
+        [string] $ContPrefix,
+        [string] $Text
+    )
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $line = ''
+    $prefix = $FirstPrefix
+    foreach ($word in ($Text -split '\s+' | Where-Object { $_ -ne '' })) {
+        if (-not $line) {
+            $line = "$prefix$word"
+            $prefix = $ContPrefix
+        } elseif (($line.Length + 1 + $word.Length) -le $Width) {
+            $line = "$line $word"
+        } else {
+            $lines.Add($line)
+            $line = "$ContPrefix$word"
+        }
+    }
+    if ($line) { $lines.Add($line) }
+    $lines -join "`n"
+}
+
 function Show-Usage {
-    @'
-usage: rocup [latest | <hash> | <path> | local | +N | -N |
-              list | remove <ver> | prune <N>]
+    $width = Get-TerminalWidth
 
-  latest          install/activate the most recent nightly from roc-lang/nightlies
-                  (default if no arg)
+    # Each command is rendered as: 2-space indent, label padded to 16 cols,
+    # then a description that word-wraps to $width with an 18-space hanging
+    # indent. The 16-col label column accommodates the widest label
+    # ('remove <ver>' = 12 chars) with breathing room.
+    $cont = ' ' * 18
+    $cmds = @(
+        @{ Label = 'latest';       Desc = "install/activate the most recent nightly from roc-lang/nightlies (default if no arg)" }
+        @{ Label = '<hash>';       Desc = "7- or 8-char hex (8-char matches 'roc --version' output, which is then truncated to 7 to look up GitHub releases). If a local install with that hash is registered, activate it. Else if the nightly is already downloaded, activate it. Else fetch the nightly from roc-lang/nightlies and install." }
+        @{ Label = '<path>';       Desc = "register a local roc as 'local-<hash>' inside `$env:ROCUP_HOME (via junction, not copy). Path must be a directory containing roc.exe. File paths are not supported on Windows." }
+        @{ Label = 'local';        Desc = "activate a registered local roc build. With one local registered, activate it; with several, activate the most recently built one (newest roc.exe mtime). Errors if no locals are registered." }
+        @{ Label = '+N | -N';      Desc = "step N nightlies newer (+) or older (-) than the active one. Requires the active version to be a nightly." }
+        @{ Label = 'list';         Desc = "show installed versions and mark the active one." }
+        @{ Label = 'remove <ver>'; Desc = "delete a version (7- or 8-char hash, or local-<hash>)." }
+        @{ Label = 'prune <N>';    Desc = "keep the N most recent nightlies; delete older ones." }
+    )
 
-  <hash>          7- or 8-char hex (8-char matches 'roc --version' output, which
-                  is then truncated to 7 to look up GitHub releases). If a local
-                  install with that hash is registered, activate it. Else if the
-                  nightly is already downloaded, activate it. Else fetch the
-                  nightly from roc-lang/nightlies and install.
+    $out = [System.Collections.Generic.List[string]]::new()
 
-  <path>          register a local roc as 'local-<hash>' inside $env:ROCUP_HOME
-                  (via junction, not copy). Path must be a directory containing
-                  roc.exe. File paths are not supported on Windows.
+    # Synopsis line. 14-space hanging indent so continuation lines align
+    # under '[latest'.
+    $out.Add( (Format-Wrapped -Width $width -FirstPrefix '' -ContPrefix (' ' * 14) `
+        -Text 'usage: rocup [latest | <hash> | <path> | local | +N | -N | list | remove <ver> | prune <N>]') )
+    $out.Add('')
 
-  local           activate a registered local roc build. With one local
-                  registered, activate it; with several, activate the most
-                  recently built one (newest roc.exe mtime). Errors if no
-                  locals are registered.
+    foreach ($c in $cmds) {
+        $first = '  ' + $c.Label.PadRight(16)
+        $out.Add( (Format-Wrapped -Width $width -FirstPrefix $first -ContPrefix $cont -Text $c.Desc) )
+        $out.Add('')
+    }
 
-  +N | -N         step N nightlies newer (+) or older (-) than the active one.
-                  Requires the active version to be a nightly.
-
-  list            show installed versions and mark the active one.
-
-  remove <ver>    delete a version (7- or 8-char hash, or local-<hash>).
-
-  prune <N>       keep the N most recent nightlies; delete older ones.
-'@
+    # Drop the trailing blank line so output ends with the last command, just
+    # like the bash version (and the prior here-string layout).
+    if ($out.Count -gt 0 -and $out[$out.Count - 1] -eq '') {
+        $out.RemoveAt($out.Count - 1)
+    }
+    $out -join "`n"
 }
 
 # --- Dispatch -------------------------------------------------------------

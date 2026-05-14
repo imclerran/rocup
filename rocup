@@ -4,50 +4,111 @@ set -euo pipefail
 
 ROCUP_HOME=${ROCUP_HOME:-$HOME/.rocup}
 
+# terminal_width
+# Echoes the column count to wrap --help output to. Explicit $COLUMNS always
+# wins (lets users and tests override). Otherwise read the controlling tty's
+# size via ioctl(TIOCGWINSZ). We deliberately go through /dev/tty rather than
+# checking '[ -t 1 ]' because terminal_width is called inside $(...), where
+# fd 1 is a capture pipe — '[ -t 1 ]' would always be false there. Falls back
+# to 78 (the prior fixed layout) when no controlling tty exists (CI, cron).
+# Clamped to [50, 120] so the layout stays readable on both extremes.
+terminal_width() {
+    local cols=""
+    if [ -n "${COLUMNS:-}" ] && [[ "$COLUMNS" =~ ^[0-9]+$ ]]; then
+        cols="$COLUMNS"
+    else
+        cols=$(stty size </dev/tty 2>/dev/null | awk '{print $2}')
+    fi
+    if [ -z "$cols" ] || ! [[ "$cols" =~ ^[0-9]+$ ]]; then
+        cols=78
+    fi
+    if [ "$cols" -gt 120 ]; then cols=120; fi
+    if [ "$cols" -lt 50 ]; then cols=50; fi
+    echo "$cols"
+}
+
+# wrap_text <width> <first_prefix> <cont_prefix> <text...>
+# Emits <text> word-wrapped to <width> columns. First line gets <first_prefix>,
+# subsequent lines get <cont_prefix>. Splits only on whitespace (never inside
+# a word), so multi-word phrases survive intact — required-phrase substring
+# matching in drift-check.sh depends on this.
+wrap_text() {
+    local width="$1" first_prefix="$2" cont_prefix="$3"
+    shift 3
+    local prefix="$first_prefix" line="" word
+    for word in $*; do
+        if [ -z "$line" ]; then
+            line="$prefix$word"
+        elif [ $(( ${#line} + 1 + ${#word} )) -le "$width" ]; then
+            line="$line $word"
+        else
+            printf '%s\n' "$line"
+            line="$cont_prefix$word"
+        fi
+    done
+    [ -n "$line" ] && printf '%s\n' "$line"
+}
+
 usage() {
-    cat <<EOF
-usage: rocup [alpha4 | latest | <hash> | <path> | local | +N | -N |
-              list | remove <ver> | prune <N>]
+    local width
+    width=$(terminal_width)
 
-  alpha4          install/activate the alpha4-rolling release. Alias: 'rust'.
+    # Synopsis line. Wraps with a 14-space hanging indent so continuation
+    # lines align under '[alpha4'.
+    wrap_text "$width" "" "              " \
+        "usage: rocup [alpha4 | latest | <hash> | <path> | local | +N | -N | list | remove <ver> | prune <N>]"
+    echo
 
-  latest          install/activate the most recent nightly from roc-lang/nightlies
-                  (default if no arg)
+    # Each command is rendered as: 2-space indent, label padded to 16 cols,
+    # then a description that word-wraps to $width with an 18-space hanging
+    # indent. The 16-col label column accommodates the widest label
+    # ('remove <ver>' = 12 chars) with breathing room.
+    local cont="                  "  # 18 spaces, matches the label column
+    local first
 
-  <hash>          7- or 8-char hex (8-char matches 'roc --version' output, which
-                  is then truncated to 7 to look up GitHub releases). If a local
-                  install with that hash is registered, activate it. Else if the
-                  nightly is already downloaded, activate it. Else fetch the
-                  nightly from roc-lang/nightlies and install.
+    first=$(printf "  %-16s" "alpha4")
+    wrap_text "$width" "$first" "$cont" \
+        "install/activate the alpha4-rolling release. Alias: 'rust'."
+    echo
 
-  <path>          register a local roc as 'local-<hash>' inside \$ROCUP_HOME (via
-                  symlink, not copy) and activate it. Directory: requires 'roc',
-                  optionally picks up 'roc_language_server'. File: links just roc.
+    first=$(printf "  %-16s" "latest")
+    wrap_text "$width" "$first" "$cont" \
+        "install/activate the most recent nightly from roc-lang/nightlies (default if no arg)"
+    echo
 
-  local           activate a registered local roc build. With one local
-                  registered, activate it; with several, activate the most
-                  recently built one (newest roc binary mtime). Errors if no
-                  locals are registered.
+    first=$(printf "  %-16s" "<hash>")
+    wrap_text "$width" "$first" "$cont" \
+        "7- or 8-char hex (8-char matches 'roc --version' output, which is then truncated to 7 to look up GitHub releases). If a local install with that hash is registered, activate it. Else if the nightly is already downloaded, activate it. Else fetch the nightly from roc-lang/nightlies and install."
+    echo
 
-  +N | -N         step N nightlies newer (+) or older (-) than the active one,
-                  resolving against the GitHub release timeline (or, if offline,
-                  among installed nightlies only). Requires the active version
-                  to be a nightly. Example: 'rocup -2' activates two releases
-                  older than current; 'rocup +1' activates the next-newer one.
+    first=$(printf "  %-16s" "<path>")
+    wrap_text "$width" "$first" "$cont" \
+        "register a local roc as 'local-<hash>' inside \$ROCUP_HOME (via symlink, not copy) and activate it. Directory: requires 'roc', optionally picks up 'roc_language_server'. File: links just roc."
+    echo
 
-  list            show installed versions (alpha4, nightlies, locals) and mark
-                  the active one. Local entries show their resolved path.
+    first=$(printf "  %-16s" "local")
+    wrap_text "$width" "$first" "$cont" \
+        "activate a registered local roc build. With one local registered, activate it; with several, activate the most recently built one (newest roc binary mtime). Errors if no locals are registered."
+    echo
 
-  remove <ver>    delete a version (alpha4, 7- or 8-char hash, or local-<hash>).
-                  A bare hash resolves to a registered local first, otherwise a
-                  nightly. If the removed version was active, the most recent
-                  remaining one becomes active. Removing a local only drops
-                  the registration; the actual local files are untouched.
+    first=$(printf "  %-16s" "+N | -N")
+    wrap_text "$width" "$first" "$cont" \
+        "step N nightlies newer (+) or older (-) than the active one, resolving against the GitHub release timeline (or, if offline, among installed nightlies only). Requires the active version to be a nightly. Example: 'rocup -2' activates two releases older than current; 'rocup +1' activates the next-newer one."
+    echo
 
-  prune <N>       keep the N most recent nightlies; delete older ones. The
-                  active nightly is always kept (counts toward N if it's
-                  already in the top N). alpha4 and locals are exempt.
-EOF
+    first=$(printf "  %-16s" "list")
+    wrap_text "$width" "$first" "$cont" \
+        "show installed versions (alpha4, nightlies, locals) and mark the active one. Local entries show their resolved path."
+    echo
+
+    first=$(printf "  %-16s" "remove <ver>")
+    wrap_text "$width" "$first" "$cont" \
+        "delete a version (alpha4, 7- or 8-char hash, or local-<hash>). A bare hash resolves to a registered local first, otherwise a nightly. If the removed version was active, the most recent remaining one becomes active. Removing a local only drops the registration; the actual local files are untouched."
+    echo
+
+    first=$(printf "  %-16s" "prune <N>")
+    wrap_text "$width" "$first" "$cont" \
+        "keep the N most recent nightlies; delete older ones. The active nightly is always kept (counts toward N if it's already in the top N). alpha4 and locals are exempt."
 }
 
 detect_platform() {
