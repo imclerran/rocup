@@ -5,60 +5,38 @@
 [roc_badge]: https://img.shields.io/endpoint?url=https%3A%2F%2Fpastebin.com%2Fraw%2FcFzuCCd7
 [roc_link]: https://github.com/roc-lang/roc
 
-A version manager for the [Roc](https://github.com/roc-lang/roc) compiler — installs, switches between, and prunes Roc releases (`alpha4-rolling`, nightlies, and local development builds) under `~/.rocup`, and wires up `roc` and `roc_language_server` in `/usr/local/bin` so the active version is always on your `PATH`.
+A version manager for the [Roc](https://github.com/roc-lang/roc) compiler — installs, switches between, and prunes Roc releases (`alpha4-rolling`, zig compiler nightlies, and local development builds) under `~/.rocup`, and wires up `roc` and `roc_language_server` so the active version is always on your `PATH`.
 
-Inspired by and adapted from [appblue/rocup](https://github.com/appblue/rocup). Credit to the original for the core idea; this version targets the new Zig-based Roc compiler, adds support for the `alpha4-rolling` release and local development builds, and includes commands for listing, removing, and pruning installed versions.
+## Quick Start
+### **Install**
 
-## Installation
-
-On macOS and Linux:
+**macOS / Linux**
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/imclerran/rocup/main/install.sh | sh
 ```
 
-The installer asks for confirmation up front. If you accept, it downloads `rocup` into `~/.rocup/rocup`, installs the latest Roc nightly, and symlinks `rocup`, `roc`, and `roc_language_server` into `/usr/local/bin` so they're on your `PATH`. It will use `sudo` if writing to `/usr/local/bin` requires it. If you decline, the installer aborts before downloading anything.
-
-To skip the prompt (e.g. in CI), set `ROCUP_ASSUME_YES=1` before piping to `sh`.
-
-To uninstall, run the matching one-liner. It removes the symlinks from `/usr/local/bin` and deletes `~/.rocup`, but does not touch the source directories behind any `local-*` registrations:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/imclerran/rocup/main/uninstall.sh | sh
-```
-
-On Windows (PowerShell):
+**Windows (PowerShell)**
 
 ```ps1
 iwr -useb https://raw.githubusercontent.com/imclerran/rocup/main/install.ps1 | iex
 ```
 
-Same UX as the macOS/Linux installer: prompts for confirmation, downloads `rocup.ps1` into `%USERPROFILE%\.rocup`, adds `~/.rocup\bin` and `~/.rocup\roc` to your User PATH, and installs the latest Roc nightly. Set `$env:ROCUP_ASSUME_YES = '1'` to skip the prompt.
+Both installers prompt for confirmation before downloading anything. Set `ROCUP_ASSUME_YES=1` (or `$env:ROCUP_ASSUME_YES = '1'` on Windows) to skip the prompt in CI. On Windows, restart your terminal afterward so PATH updates take effect.
 
-Restart your terminal after install so PATH updates take effect.
+### **Uninstall**
 
-To uninstall, run the matching one-liner. It removes the PATH entries and deletes `%USERPROFILE%\.rocup`, but does not touch the source directories behind any `local-*` registrations:
+```sh
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/imclerran/rocup/main/uninstall.sh | sh
+```
 
 ```ps1
+# Windows
 iwr -useb https://raw.githubusercontent.com/imclerran/rocup/main/uninstall.ps1 | iex
 ```
 
-**Note:** the Windows port supports nightlies and local-directory builds but not `alpha4` (no Windows binary released for it) and not single-file local registration (NTFS junctions are directory-only). See [FEATURE_MATRIX.md](FEATURE_MATRIX.md) for per-platform capability details.
-
-Or clone and run manually:
-
-```sh
-git clone https://github.com/imclerran/rocup.git
-cd rocup
-./rocup
-```
-
-After the first successful install:
-
-- `~/.rocup/` holds every installed version in its own directory.
-- `~/.rocup/roc` is a symlink to the currently active version.
-- `/usr/local/bin/roc` points at `~/.rocup/roc/roc`.
-- `/usr/local/bin/roc_language_server` is a shim that resolves the LS for whichever `roc` is active (either a bundled `roc_language_server` binary, or `roc experimental-lsp` if the active version supports it).
+Uninstalling removes `rocup`'s install root and PATH entries but does not touch the source directories behind any `local-*` registrations.
 
 ## Usage
 
@@ -71,7 +49,7 @@ rocup [alpha4 | latest | <hash> | <path> | +N | -N | list | remove <ver> | prune
 | `rocup alpha4` | Install/activate the `alpha4-rolling` release from `roc-lang/roc`. |
 | `rocup latest` | Install/activate the most recent nightly from `roc-lang/nightlies`. This is the default if no argument is given. |
 | `rocup <hash>` | 7- or 8-char hex (8-char matches the output of `roc --version`, and is truncated to 7 to look up GitHub releases). If a local install with that hash is registered, activate it. Otherwise activate the matching nightly (downloading it if necessary). |
-| `rocup <path>` | Register a local `roc` build as `local-<hash>` and activate it. Path may be a directory containing `roc` (and optionally `roc_language_server`), or a path to a `roc` binary directly. Registration is by symlink, not copy. |
+| `rocup <path>` | Register a local `roc` build as `local-<hash>` and activate it. Path is a directory containing `roc` (and optionally `roc_language_server`); on macOS/Linux it may also point directly at a `roc` binary. Registration is by symlink (NTFS junction on Windows), not copy. |
 | `rocup +N` / `rocup -N` | Step `N` nightlies newer (`+`) or older (`-`) than the active one. Resolves against the `roc-lang/nightlies` release timeline, falling back to installed nightlies only when offline. Requires the active version to be a nightly. |
 | `rocup list` | Show installed versions, oldest first, with the active version marked `->`. Local entries also show their resolved path. |
 | `rocup remove <ver>` | Delete a version — `alpha4`, a 7- or 8-char hash, or `local-<hash>`. A bare hash resolves to a registered local first, otherwise a nightly. If the removed version was active, the most recent remaining one becomes active. Removing a local only drops the registration; the actual source files are untouched. |
@@ -91,18 +69,36 @@ rocup remove a1b2c3d         # remove a specific version
 rocup prune 5                # keep the 5 most recent nightlies
 ```
 
-## Environment
-
-- `ROCUP_HOME` — install root (default `$HOME/.rocup`).
-- `ROCUP_PREFIX` — where global symlinks go (default `/usr/local/bin`).
-- `TMPDIR` — used for downloads/extraction scratch space.
-
-## Supported platforms
+## Platform support
 
 - macOS (Apple Silicon and x86_64)
 - Linux (x86_64 and arm64/aarch64)
-- Windows (x86_64 and arm64) — nightlies only; see [FEATURE_MATRIX.md](FEATURE_MATRIX.md)
+- Windows (x86_64 and arm64)
 
-## How it talks to GitHub
+The Windows port covers nightlies and local-directory builds but diverges from the macOS/Linux build in a couple of places:
 
-Nightly metadata and downloads use `gh` if it's available and authenticated, falling back to the public GitHub REST API and direct asset URLs via `curl` — so authentication is not required for public releases.
+| Capability | macOS/Linux | Windows |
+|---|:---:|:---:|
+| `alpha4` release | yes | no (no Windows binary upstream) |
+| Cross-volume local builds | yes | no (junctions require same volume) |
+
+See [FEATURE_MATRIX.md](FEATURE_MATRIX.md) for the full per-platform capability table.
+
+## Manual install (macOS / Linux)
+
+```sh
+git clone https://github.com/imclerran/rocup.git
+cd rocup
+./rocup
+```
+
+After a successful install:
+
+- `~/.rocup/` holds every installed version in its own directory.
+- `~/.rocup/roc` is a symlink to the currently active version.
+- `/usr/local/bin/roc` points at `~/.rocup/roc/roc`.
+- `/usr/local/bin/roc_language_server` is a shim that resolves the LS for whichever `roc` is active (either a bundled `roc_language_server` binary, or `roc experimental-lsp` if the active version supports it).
+
+## Credits
+
+Inspired by and adapted from [appblue/rocup](https://github.com/appblue/rocup). Credit to the original for the core idea; this version targets the new Zig-based Roc compiler, adds support for the `alpha4-rolling` release and local development builds, and includes commands for listing, removing, and pruning installed versions.
