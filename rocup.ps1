@@ -703,7 +703,17 @@ function Invoke-Local {
     if ($locals.Count -eq 0) {
         throw "error: no local versions registered. Use 'rocup <path>' to register one."
     }
-    $best = $locals | Sort-Object { Get-Mtime $_.FullName } -Descending | Select-Object -First 1
+    # Prefer roc.exe's mtime over the dir's: an in-place rebuild that overwrites
+    # roc.exe won't bump the directory mtime, and matches the bash port.
+    $best = $locals | Sort-Object {
+        $resolved = Resolve-LinkTarget $_.FullName
+        $exe = Join-Path $resolved.FullName 'roc.exe'
+        if (Test-Path -LiteralPath $exe) {
+            (Get-Item -LiteralPath $exe).LastWriteTime
+        } else {
+            $resolved.LastWriteTime
+        }
+    } -Descending | Select-Object -First 1
     Set-ActiveVersion $best.Name
 }
 
