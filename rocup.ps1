@@ -693,6 +693,30 @@ function Step-NightlyViaInstalled {
     Set-ActiveVersion $target
 }
 
+function Invoke-Local {
+    # Activate a registered local roc build. Single registration: pick it.
+    # Multiple: pick the one whose roc.exe has the newest mtime. None: error.
+    if (-not (Test-Path -LiteralPath $script:RocupHome -PathType Container)) {
+        throw "error: no local versions registered. Use 'rocup <path>' to register one."
+    }
+    $locals = @(Get-InstalledVersionDirs | Where-Object { $_.Name -like 'local-*' })
+    if ($locals.Count -eq 0) {
+        throw "error: no local versions registered. Use 'rocup <path>' to register one."
+    }
+    # Prefer roc.exe's mtime over the dir's: an in-place rebuild that overwrites
+    # roc.exe won't bump the directory mtime, and matches the bash port.
+    $best = $locals | Sort-Object {
+        $resolved = Resolve-LinkTarget $_.FullName
+        $exe = Join-Path $resolved.FullName 'roc.exe'
+        if (Test-Path -LiteralPath $exe) {
+            (Get-Item -LiteralPath $exe).LastWriteTime
+        } else {
+            $resolved.LastWriteTime
+        }
+    } -Descending | Select-Object -First 1
+    Set-ActiveVersion $best.Name
+}
+
 function Register-Local {
     param([Parameter(Mandatory)][string] $InputPath)
 
@@ -804,7 +828,7 @@ function Invoke-List {
 
 function Show-Usage {
     @'
-usage: rocup [latest | <hash> | <path> | +N | -N | list | remove <ver> | prune <N>]
+usage: rocup [latest | <hash> | <path> | local | +N | -N | list | remove <ver> | prune <N>]
 
   latest          install/activate the most recent nightly from roc-lang/nightlies
                   (default if no arg)
@@ -818,6 +842,11 @@ usage: rocup [latest | <hash> | <path> | +N | -N | list | remove <ver> | prune <
   <path>          register a local roc as 'local-<hash>' inside $env:ROCUP_HOME
                   (via junction, not copy). Path must be a directory containing
                   roc.exe. File paths are not supported on Windows.
+
+  local           activate a registered local roc build. With one local
+                  registered, activate it; with several, activate the most
+                  recently built one (newest roc.exe mtime). Errors if no
+                  locals are registered.
 
   +N | -N         step N nightlies newer (+) or older (-) than the active one.
                   Requires the active version to be a nightly.
@@ -840,6 +869,7 @@ function Invoke-Rocup {
     switch -Regex ($cmd) {
         '^(-h|--help|help)$' { Show-Usage; return }
         '^list$'             { Invoke-List; return }
+        '^local$'            { Invoke-Local; Initialize-RocupShims; return }
         '^remove$' {
             if ($argv.Count -lt 2) {
                 throw "error: 'remove' requires an argument (7- or 8-char hash, or local-<hash>)"

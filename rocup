@@ -6,7 +6,7 @@ ROCUP_HOME=${ROCUP_HOME:-$HOME/.rocup}
 
 usage() {
     cat <<EOF
-usage: $0 [alpha4 | latest | <hash> | <path> | +N | -N | list | remove <ver> | prune <N>]
+usage: $0 [alpha4 | latest | <hash> | <path> | local | +N | -N | list | remove <ver> | prune <N>]
 
   alpha4          install/activate the alpha4-rolling release
 
@@ -22,6 +22,11 @@ usage: $0 [alpha4 | latest | <hash> | <path> | +N | -N | list | remove <ver> | p
   <path>          register a local roc as 'local-<hash>' inside \$ROCUP_HOME (via
                   symlink, not copy) and activate it. Directory: requires 'roc',
                   optionally picks up 'roc_language_server'. File: links just roc.
+
+  local           activate a registered local roc build. With one local
+                  registered, activate it; with several, activate the most
+                  recently built one (newest roc binary mtime). Errors if no
+                  locals are registered.
 
   +N | -N         step N nightlies newer (+) or older (-) than the active one,
                   resolving against the GitHub release timeline (or, if offline,
@@ -903,6 +908,38 @@ register_local() {
     activate "$dir_name"
 }
 
+activate_local() {
+    # Activate a registered local roc build. Single registration: pick it.
+    # Multiple: pick the one whose roc binary has the newest mtime. None: error.
+    if [ ! -d "$ROCUP_HOME" ]; then
+        echo "error: no local versions registered. Use 'rocup <path>' to register one." >&2
+        exit 1
+    fi
+
+    local tmp
+    tmp=$(mktemp)
+    while IFS= read -r -d '' dir; do
+        local target="$dir/roc"
+        [ -e "$target" ] || target="$dir"
+        local epoch
+        epoch=$(mtime_of "$target") || epoch=0
+        printf "%s %s\n" "$epoch" "$(basename "$dir")" >> "$tmp"
+    done < <(find "$ROCUP_HOME" -maxdepth 1 -mindepth 1 \
+        \( -type d -o -type l \) \
+        -name 'local-*' -print0)
+
+    if [ ! -s "$tmp" ]; then
+        rm -f "$tmp"
+        echo "error: no local versions registered. Use 'rocup <path>' to register one." >&2
+        exit 1
+    fi
+
+    local pick
+    pick=$(sort -n "$tmp" | tail -n1 | cut -d' ' -f2-)
+    rm -f "$tmp"
+    activate "$pick"
+}
+
 install_ls_shim() {
     # $1 = prefix dir. Writes a static shim script at $prefix/roc_language_server
     # that, at runtime, either execs the active version's LS binary or prints
@@ -1017,6 +1054,10 @@ case "$cmd" in
         ;;
     list)
         do_list
+        ;;
+    local)
+        activate_local
+        ensure_global_symlinks
         ;;
     remove)
         if [ $# -lt 2 ]; then

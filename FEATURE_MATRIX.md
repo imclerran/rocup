@@ -9,6 +9,7 @@
 | `remove <ver>` — delete a version                           | yes                   | yes                   |
 | `prune <N>` — keep N most recent nightlies                  | yes                   | yes                   |
 | `<dir>` — register a local Roc build directory              | yes                   | yes                   |
+| `local` — activate newest registered local build            | yes                   | yes                   |
 | `alpha4` — install the alpha4-rolling release               | yes                   | no (no Windows binary) |
 | `<file>` — register a single roc binary file                | yes                   | no (junctions are dir-only) |
 | Cross-volume local builds                                   | yes                   | no (NTFS junctions require same volume) |
