@@ -17,9 +17,9 @@ assert_max_line_width() {
 output=$(COLUMNS=60 "$ROCUP" --help 2>&1)
 assert_max_line_width "$output" 60 "COLUMNS=60"
 
-# Very wide width: output should be capped at the 120-col upper bound.
+# Wide width: no upper cap — output should fit in the requested width.
 output=$(COLUMNS=200 "$ROCUP" --help 2>&1)
-assert_max_line_width "$output" 120 "COLUMNS=200 (cap)"
+assert_max_line_width "$output" 200 "COLUMNS=200 (no upper cap)"
 
 # Below-floor width: output should still cap at the 50-col floor.
 output=$(COLUMNS=20 "$ROCUP" --help 2>&1)

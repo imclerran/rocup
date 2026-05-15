@@ -27,9 +27,9 @@ function Invoke-HelpAtWidth {
 $output = Invoke-HelpAtWidth 60
 Assert-MaxLineWidth $output 60 'COLUMNS=60'
 
-# Very wide width: output should be capped at the 120-col upper bound.
+# Wide width: no upper cap — output should fit in the requested width.
 $output = Invoke-HelpAtWidth 200
-Assert-MaxLineWidth $output 120 'COLUMNS=200 (cap)'
+Assert-MaxLineWidth $output 200 'COLUMNS=200 (no upper cap)'
 
 # Below-floor width: output should still cap at the 50-col floor.
 $output = Invoke-HelpAtWidth 20

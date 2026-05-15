@@ -11,7 +11,8 @@ ROCUP_HOME=${ROCUP_HOME:-$HOME/.rocup}
 # checking '[ -t 1 ]' because terminal_width is called inside $(...), where
 # fd 1 is a capture pipe — '[ -t 1 ]' would always be false there. Falls back
 # to 78 (the prior fixed layout) when no controlling tty exists (CI, cron).
-# Clamped to [50, 120] so the layout stays readable on both extremes.
+# Floored at 50 so the 18-col label gutter still leaves room for descriptions;
+# no upper bound — wide terminals get a single-line layout.
 terminal_width() {
     local cols=""
     if [ -n "${COLUMNS:-}" ] && [[ "$COLUMNS" =~ ^[0-9]+$ ]]; then
@@ -22,7 +23,6 @@ terminal_width() {
     if [ -z "$cols" ] || ! [[ "$cols" =~ ^[0-9]+$ ]]; then
         cols=78
     fi
-    if [ "$cols" -gt 120 ]; then cols=120; fi
     if [ "$cols" -lt 50 ]; then cols=50; fi
     echo "$cols"
 }
