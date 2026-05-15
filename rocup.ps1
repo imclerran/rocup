@@ -891,8 +891,9 @@ function Invoke-List {
 # — the PowerShell equivalent of the bash version's '/dev/tty' trick, which
 # returns the real console size regardless of whether the caller is capturing
 # stdout (Out-String, redirection, etc.). Falls back to 78 (the prior fixed
-# layout) when no console is attached. Clamped to [50, 120] so the layout
-# stays readable on both extremes.
+# layout) when no console is attached. Floored at 50 so the 18-col label
+# gutter still leaves room for descriptions; no upper bound — wide terminals
+# get a single-line layout.
 function Get-TerminalWidth {
     $cols = 0
     if ($env:COLUMNS -and ($env:COLUMNS -match '^\d+$')) {
@@ -900,9 +901,8 @@ function Get-TerminalWidth {
     } else {
         try { $cols = [int] $Host.UI.RawUI.WindowSize.Width } catch { $cols = 0 }
     }
-    if ($cols -le 0)   { $cols = 78  }
-    if ($cols -gt 120) { $cols = 120 }
-    if ($cols -lt 50)  { $cols = 50  }
+    if ($cols -le 0)  { $cols = 78 }
+    if ($cols -lt 50) { $cols = 50 }
     $cols
 }
 
