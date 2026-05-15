@@ -264,6 +264,40 @@ function Initialize-RocupShims {
 
 # --- GitHub API ----------------------------------------------------------
 
+# Invoke-GhSafely
+# Runs gh with the given argv, isolating the caller from gh's failure modes:
+#   - $ErrorActionPreference = 'Stop' (set at top of script) + PS 7.4's
+#     $PSNativeCommandUseErrorActionPreference would otherwise turn gh's
+#     non-zero exit (e.g. exit 4 when unauthenticated) into a terminating
+#     error before our $LASTEXITCODE check fires. We lower the preference
+#     locally and wrap in try/catch.
+#   - gh's auth-required message goes to stderr; capture it via 2>&1 and
+#     filter ErrorRecords out of the result so it can't leak to the user
+#     when we fall back. 2>$null alone is unreliable on PS 5.1.
+# Returns @{ Output = <stdout string array>; ExitCode = <int> }.
+function Invoke-GhSafely {
+    param([Parameter(Mandatory)][string[]] $GhArgs)
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $output = @()
+    $exit   = 1
+    try {
+        $merged = & gh @GhArgs 2>&1
+        $exit = $LASTEXITCODE
+        # Keep plain strings (stdout); drop ErrorRecords (stderr lines).
+        $output = @($merged | Where-Object { $_ -is [string] })
+    }
+    catch {
+        $exit   = 1
+        $output = @()
+    }
+    finally {
+        $ErrorActionPreference = $prevEAP
+        $global:LASTEXITCODE   = 0
+    }
+    [PSCustomObject]@{ Output = $output; ExitCode = $exit }
+}
+
 function Get-RecentTags {
     param(
         [Parameter(Mandatory)][string] $Repo,
@@ -278,11 +312,9 @@ function Get-RecentTags {
     # Falls through to Invoke-RestMethod when gh is absent, unauthenticated, or
     # returns no rows. Mirrors fetch_recent_tags() in the bash port.
     if (Get-Command gh -ErrorAction SilentlyContinue) {
-        $ghTags = @(& gh release list --repo $Repo --limit $Count `
-                        --json tagName --jq '.[].tagName' 2>$null)
-        $ghExit = $LASTEXITCODE
-        $global:LASTEXITCODE = 0
-        if ($ghExit -eq 0 -and $ghTags.Count -gt 0) { return $ghTags }
+        $r = Invoke-GhSafely @('release', 'list', '--repo', $Repo,
+            '--limit', "$Count", '--json', 'tagName', '--jq', '.[].tagName')
+        if ($r.ExitCode -eq 0 -and $r.Output.Count -gt 0) { return $r.Output }
     }
 
     # GitHub REST silently caps per_page at 100; paginate when count > 100.
@@ -341,11 +373,10 @@ function Get-NightlyAsset {
     # download_nightly_asset() in the bash port.
     if (Get-Command gh -ErrorAction SilentlyContinue) {
         $pattern = "roc_nightly-$Platform-*-$Hash.zip"
-        & gh release download $Tag --repo roc-lang/nightlies `
-            --pattern $pattern --dir $DestDir 2>$null
-        $ghExit = $LASTEXITCODE
-        $global:LASTEXITCODE = 0
-        if ($ghExit -eq 0 -and (Test-Path -LiteralPath $out)) { return $out }
+        $r = Invoke-GhSafely @('release', 'download', $Tag,
+            '--repo', 'roc-lang/nightlies',
+            '--pattern', $pattern, '--dir', $DestDir)
+        if ($r.ExitCode -eq 0 -and (Test-Path -LiteralPath $out)) { return $out }
     }
 
     $url = "https://github.com/roc-lang/nightlies/releases/download/$Tag/$asset"
