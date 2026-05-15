@@ -14,7 +14,7 @@
 | `<file>` — register a single roc binary file                | yes                   | no (junctions are dir-only) |
 | Cross-volume local builds                                   | yes                   | no (NTFS junctions require same volume) |
 | Standalone `roc_language_server` binary dispatch            | yes                   | no (always uses `roc experimental-lsp`) |
-| Optional `gh` CLI for GitHub API                            | yes                   | no                    |
+| Optional `gh` CLI for GitHub API                            | yes                   | yes                   |
 
 ## When this matrix changes
 
