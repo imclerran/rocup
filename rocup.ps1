@@ -823,13 +823,13 @@ function Test-FreezeName {
 
 function Invoke-Freeze {
     param(
-        [Parameter(Mandatory)][string[]] $argv
+        [Parameter(Mandatory)][string[]] $Argv
     )
-    # argv = the args AFTER 'freeze' (i.e., $name and any flags).
+    # Argv = the args AFTER 'freeze' (i.e., $name and any flags).
     $force = $false
     $name  = ''
-    for ($i = 0; $i -lt $argv.Count; $i++) {
-        $a = $argv[$i]
+    for ($i = 0; $i -lt $Argv.Count; $i++) {
+        $a = $Argv[$i]
         if ($a -eq '--force') {
             $force = $true
         } elseif ($a.StartsWith('-')) {
@@ -1069,7 +1069,7 @@ function Show-Usage {
         @{ Label = '+N | -N';      Desc = "step N nightlies newer (+) or older (-) than the active one. Requires the active version to be a nightly." }
         @{ Label = 'list';         Desc = "show installed versions and mark the active one." }
         @{ Label = 'freeze <name>'; Desc = "snapshot the active local build into `$env:ROCUP_HOME\frozen-<name>\ as real files (not junctions). Requires an active local. <name> matches [a-zA-Z0-9._-] and must not collide with an existing hash. Pass --force to overwrite an existing frozen entry. The original local-<hash> registration is left intact; active becomes frozen-<name>." }
-        @{ Label = 'remove <ver>'; Desc = "delete a version (7- or 8-char hash, or local-<hash>)." }
+        @{ Label = 'remove <ver>'; Desc = "delete a version (7- or 8-char hash, local-<hash>, frozen-<name>, or a bare frozen name)." }
         @{ Label = 'prune <N>';    Desc = "keep the N most recent nightlies; delete older ones." }
     )
 
@@ -1125,7 +1125,7 @@ function Invoke-Rocup {
             if ($argv.Count -lt 2) {
                 throw "error: 'freeze' requires a name (e.g. 'rocup freeze myfeature')"
             }
-            Invoke-Freeze -argv $argv[1..($argv.Count - 1)]
+            Invoke-Freeze -Argv $argv[1..($argv.Count - 1)]
             Initialize-RocupShims
             return
         }

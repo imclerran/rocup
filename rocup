@@ -108,7 +108,7 @@ usage() {
 
     first=$(printf "  %-16s" "remove <ver>")
     wrap_text "$width" "$first" "$cont" \
-        "delete a version (alpha4, 7- or 8-char hash, or local-<hash>). A bare hash resolves to a registered local first, otherwise a nightly. If the removed version was active, the most recent remaining one becomes active. Removing a local only drops the registration; the actual local files are untouched."
+        "delete a version (alpha4, 7- or 8-char hash, local-<hash>, frozen-<name>, or a bare frozen name). A bare hash resolves to a registered local first, otherwise a nightly. If the removed version was active, the most recent remaining one becomes active. Removing a local only drops the registration; the actual local files are untouched."
     echo
 
     first=$(printf "  %-16s" "prune <N>")
@@ -1312,6 +1312,11 @@ case "$cmd" in
         prune_nightlies "$2"
         ;;
     freeze)
+        if [ $# -lt 2 ]; then
+            echo "error: 'freeze' requires a name (e.g. 'rocup freeze myfeature')" >&2
+            usage >&2
+            exit 1
+        fi
         shift
         do_freeze "$@"
         ensure_global_symlinks
