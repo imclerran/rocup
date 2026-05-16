@@ -512,10 +512,11 @@ function Invoke-HashDispatch {
 }
 
 function Get-FallbackVersion {
-    # Pick the most recent nightly to fall back to; else most recent local.
-    # Returns the directory name (e.g. 'roc_nightly-2025-10-25-2b89aee') or ''.
+    # Pick the most recent nightly; else most recent local; else most recent frozen.
+    # Returns the directory name or ''.
     $dirs = @(Get-InstalledVersionDirs)
     if ($dirs.Count -eq 0) { return '' }
+
     $nightlies = @($dirs | Where-Object { $_.Name -like 'roc_nightly-*' })
     if ($nightlies.Count -gt 0) {
         $best = $nightlies | Sort-Object { Get-DirSortKey $_.FullName } -Descending | Select-Object -First 1
@@ -524,6 +525,11 @@ function Get-FallbackVersion {
     $locals = @($dirs | Where-Object { $_.Name -like 'local-*' })
     if ($locals.Count -gt 0) {
         $best = $locals | Sort-Object { Get-DirSortKey $_.FullName } -Descending | Select-Object -First 1
+        return $best.Name
+    }
+    $frozens = @($dirs | Where-Object { $_.Name -like 'frozen-*' })
+    if ($frozens.Count -gt 0) {
+        $best = $frozens | Sort-Object { Get-DirSortKey $_.FullName } -Descending | Select-Object -First 1
         return $best.Name
     }
     return ''
