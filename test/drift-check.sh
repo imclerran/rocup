@@ -68,6 +68,11 @@ Requires the active version to be a nightly
 show installed versions
 mark the active
 
+# 'freeze <name>' - snapshot the active local build.
+snapshot the active local build
+Requires an active local
+--force
+
 # 'remove <ver>' - version deletion.
 delete a version
 
@@ -154,10 +159,10 @@ while IFS= read -r phrase; do
     case "$phrase" in
         ''|'#'*) continue ;;
     esac
-    if ! printf '%s' "$bash_help" | grep -qF "$phrase"; then
+    if ! printf '%s' "$bash_help" | grep -qF -- "$phrase"; then
         missing_in_bash="${missing_in_bash}${phrase}"$'\n'
     fi
-    if ! printf '%s' "$ps_help" | grep -qF "$phrase"; then
+    if ! printf '%s' "$ps_help" | grep -qF -- "$phrase"; then
         missing_in_ps="${missing_in_ps}${phrase}"$'\n'
     fi
 done <<< "$REQUIRED_PHRASES"
