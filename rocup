@@ -963,6 +963,105 @@ validate_freeze_name() {
     return 0
 }
 
+# do_freeze <name> [--force]
+# Snapshots the currently-active local-<hash> build into $ROCUP_HOME/frozen-<name>/.
+# Preconditions: active version exists and is a local-<hash> entry; the local
+# entry resolves (not dangling); the resolved dir contains a roc binary.
+# Copies roc (and, on macOS/Linux, roc_language_server if present in dir-mode)
+# as real files with symlinks dereferenced, then activates frozen-<name>. The
+# original local-<hash> registration is left intact.
+do_freeze() {
+    local name="" force=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --force) force=1; shift ;;
+            --) shift; name="${1:-}"; break ;;
+            -*) echo "freeze: unknown option '$1'" >&2; return 1 ;;
+            *)
+                if [ -n "$name" ]; then
+                    echo "freeze: too many arguments (already have name '$name', also got '$1')" >&2
+                    return 1
+                fi
+                name="$1"; shift
+                ;;
+        esac
+    done
+
+    validate_freeze_name "$name" || return 1
+
+    # Precondition: an active version exists.
+    if [ ! -L "$ROCUP_HOME/roc" ]; then
+        echo "freeze: no active version" >&2
+        return 1
+    fi
+    local active
+    active=$(basename "$(readlink "$ROCUP_HOME/roc")")
+
+    # Precondition: active is a local-<hash> entry.
+    case "$active" in
+        local-*) ;;
+        *)
+            echo "freeze: active version is $active; freeze requires an active local build" >&2
+            return 1
+            ;;
+    esac
+
+    # Resolve through the local registration. Two shapes are possible:
+    #   Dir-mode  : $entry is itself a symlink to the build directory.
+    #   File-mode : $entry is a real directory containing a 'roc' symlink that
+    #               points at a standalone binary in the user's tree. (Unix only.)
+    # In both shapes, "$entry/roc" transitively resolves to the binary.
+    local entry="$ROCUP_HOME/$active"
+    local source_dir
+    if [ -L "$entry" ]; then
+        # Dir-mode dangling check: -e on a dangling symlink is false.
+        if [ ! -e "$entry" ]; then
+            echo "freeze: cannot resolve active local $active; the source directory may have been moved or deleted" >&2
+            return 1
+        fi
+        source_dir=$(readlink "$entry")
+    elif [ -d "$entry" ] && [ -L "$entry/roc" ]; then
+        if [ ! -e "$entry/roc" ]; then
+            echo "freeze: cannot resolve active local $active; the source directory may have been moved or deleted" >&2
+            return 1
+        fi
+        source_dir=$(dirname "$(readlink "$entry/roc")")
+    else
+        echo "freeze: cannot resolve active local $active; unexpected registration shape" >&2
+        return 1
+    fi
+    if [ ! -x "$entry/roc" ]; then
+        echo "freeze: roc binary not found in $source_dir" >&2
+        return 1
+    fi
+
+    # Collision handling.
+    local dest="$ROCUP_HOME/frozen-$name"
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+        if [ "$force" -ne 1 ]; then
+            echo "freeze: frozen-$name already exists. Use --force to overwrite." >&2
+            return 1
+        fi
+        rm -rf "$dest"
+    fi
+
+    # Copy. -L dereferences symlinks so the result is a real file even when
+    # the source roc was itself a symlink (file-mode registration). -p
+    # preserves the executable bit.
+    mkdir -p "$dest"
+    cp -Lp "$entry/roc" "$dest/roc"
+    # Language-server policy:
+    #   - dir-mode: copy roc_language_server if it sits next to roc in the build dir.
+    #   - file-mode: the user explicitly registered only the roc binary; do not
+    #     reach back into the source dir to pick up anything else.
+    if [ -L "$entry" ] && [ -e "$entry/roc_language_server" ]; then
+        cp -Lp "$entry/roc_language_server" "$dest/roc_language_server"
+    fi
+    echo ".. frozen $active as frozen-$name ($source_dir)"
+
+    activate "frozen-$name"
+}
+
 register_local() {
     # $1 = directory containing roc[+roc_language_server] OR path to a roc binary.
     # Registers it as $ROCUP_HOME/local-<7-char-hash-of-abs-path> and activates.
@@ -1180,24 +1279,8 @@ case "$cmd" in
         ;;
     freeze)
         shift
-        # Detailed implementation lands in Task 3. For now, validator-only stub.
-        force=0
-        name=""
-        while [ $# -gt 0 ]; do
-            case "$1" in
-                --force) force=1; shift ;;
-                --) shift; name="${1:-}"; shift || true ;;
-                -*) echo "freeze: unknown option '$1'" >&2; exit 1 ;;
-                *) name="$1"; shift ;;
-            esac
-        done
-        validate_freeze_name "$name" || exit 1
-        if [ -e "$ROCUP_HOME/frozen-$name" ] && [ "$force" -ne 1 ]; then
-            echo "freeze: frozen-$name already exists. Use --force to overwrite." >&2
-            exit 1
-        fi
-        echo "freeze: stub (Task 1) — preconditions ok for '$name'" >&2
-        exit 1
+        do_freeze "$@"
+        ensure_global_symlinks
         ;;
     *)
         if [[ "$cmd" =~ ^[+-][0-9]+$ ]]; then
