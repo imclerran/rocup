@@ -804,6 +804,65 @@ function Test-FreezeName {
     $Name
 }
 
+function Invoke-Freeze {
+    param(
+        [Parameter(Mandatory)][string[]] $argv
+    )
+    # argv = the args AFTER 'freeze' (i.e., $name and any flags).
+    $force = $false
+    $name  = ''
+    for ($i = 0; $i -lt $argv.Count; $i++) {
+        $a = $argv[$i]
+        if ($a -eq '--force') {
+            $force = $true
+        } elseif ($a.StartsWith('-')) {
+            throw "freeze: unknown option '$a'"
+        } elseif (-not $name) {
+            $name = $a
+        } else {
+            throw "freeze: too many arguments (already have name '$name', also got '$a')"
+        }
+    }
+
+    $null = Test-FreezeName $name
+
+    $rocLink = Join-Path $script:RocupHome 'roc'
+    if (-not (Test-IsJunction $rocLink)) {
+        throw "freeze: no active version"
+    }
+    $linkTarget = (Get-Item -LiteralPath $rocLink -Force).Target | Select-Object -First 1
+    $active = Split-Path -Leaf $linkTarget
+
+    if ($active -notlike 'local-*') {
+        throw "freeze: active version is $active; freeze requires an active local build"
+    }
+
+    $entry = Join-Path $script:RocupHome $active
+    $resolved = Get-LocalInstallPath $entry
+    if (-not $resolved -or -not (Test-Path -LiteralPath $resolved -PathType Container)) {
+        throw "freeze: cannot resolve active local $active; the source directory may have been moved or deleted"
+    }
+    $srcExe = Join-Path $resolved 'roc.exe'
+    if (-not (Test-Path -LiteralPath $srcExe -PathType Leaf)) {
+        throw "freeze: roc binary not found in $resolved"
+    }
+
+    $dest = Join-Path $script:RocupHome "frozen-$name"
+    if (Test-Path -LiteralPath $dest) {
+        if (-not $force) {
+            throw "freeze: frozen-$name already exists. Use --force to overwrite."
+        }
+        Remove-Item -LiteralPath $dest -Recurse -Force
+    }
+
+    New-Item -ItemType Directory -Path $dest -Force | Out-Null
+    Copy-Item -LiteralPath $srcExe -Destination (Join-Path $dest 'roc.exe') -Force
+
+    Write-Host ".. frozen $active as frozen-$name ($resolved)"
+
+    Set-ActiveVersion "frozen-$name"
+}
+
 function Register-Local {
     param([Parameter(Mandatory)][string] $InputPath)
 
@@ -1035,21 +1094,9 @@ function Invoke-Rocup {
             if ($argv.Count -lt 2) {
                 throw "error: 'freeze' requires a name (e.g. 'rocup freeze myfeature')"
             }
-            # Stub for Task 11 — replaced in Task 12.
-            $force = $false
-            $name  = ''
-            for ($i = 1; $i -lt $argv.Count; $i++) {
-                if     ($argv[$i] -eq '--force') { $force = $true }
-                elseif ($argv[$i].StartsWith('-')) { throw "freeze: unknown option '$($argv[$i])'" }
-                elseif (-not $name) { $name = $argv[$i] }
-                else  { throw "freeze: too many arguments" }
-            }
-            $null = Test-FreezeName $name
-            $dest = Join-Path $script:RocupHome "frozen-$name"
-            if ((Test-Path -LiteralPath $dest) -and -not $force) {
-                throw "freeze: frozen-$name already exists. Use --force to overwrite."
-            }
-            throw "freeze: stub (Task 11) — preconditions ok for '$name'"
+            Invoke-Freeze -argv $argv[1..($argv.Count - 1)]
+            Initialize-RocupShims
+            return
         }
         '^[+-][0-9]+$'       { Step-Nightly $cmd; Initialize-RocupShims; return }
         '^[0-9a-f]{7,8}$'    { Invoke-HashDispatch $cmd; return }
