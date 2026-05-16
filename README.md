@@ -41,7 +41,7 @@ Uninstalling removes `rocup`'s install root and PATH entries but does not touch 
 ## Usage
 
 ```
-rocup [alpha4 | latest | <hash> | <path> | local | +N | -N | list | remove <ver> | prune <N>]
+rocup [alpha4 | latest | <hash> | <path> | local | +N | -N | list | freeze <name> | remove <ver> | prune <N>]
 ```
 
 | Command | What it does |
@@ -53,6 +53,7 @@ rocup [alpha4 | latest | <hash> | <path> | local | +N | -N | list | remove <ver>
 | `rocup local` | Activate a registered local `roc` build. With one local registered, activates it; with several, activates the most recently built one (newest `roc` binary mtime). Errors if none are registered. |
 | `rocup +N` / `rocup -N` | Step `N` nightlies newer (`+`) or older (`-`) than the active one. Resolves against the `roc-lang/nightlies` release timeline, falling back to installed nightlies only when offline. Requires the active version to be a nightly. |
 | `rocup list` | Show installed versions, oldest first, with the active version marked `->`. Local entries also show their resolved path. |
+| `rocup freeze <name>` | Snapshot the active local build into `~/.rocup/frozen-<name>/` as real files (binaries are dereferenced and copied, not symlinked). Requires an active `local-<hash>`; the original local registration is preserved and `frozen-<name>` becomes active. Names match `[a-zA-Z0-9._-]` and must not collide with an installed hash. Pass `--force` to overwrite. |
 | `rocup remove <ver>` | Delete a version — `alpha4`, a 7- or 8-char hash, or `local-<hash>`. A bare hash resolves to a registered local first, otherwise a nightly. If the removed version was active, the most recent remaining one becomes active. Removing a local only drops the registration; the actual source files are untouched. |
 | `rocup prune <N>` | Keep the `N` most recent nightlies; delete older ones. `alpha4` and local registrations are exempt. The active nightly is always kept. |
 
@@ -64,6 +65,7 @@ rocup alpha4                 # switch to the alpha4-rolling release
 rocup a1b2c3d                # activate (or download) nightly a1b2c3d
 rocup ~/src/roc/zig-out/bin  # register and activate a local dev build
 rocup local                  # re-activate the most recent local build
+rocup freeze myfeature       # snapshot the active local build as frozen-myfeature
 rocup -1                     # step back to the previous nightly
 rocup +2                     # step forward two nightlies from active
 rocup list                   # see what's installed
