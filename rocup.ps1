@@ -534,7 +534,8 @@ function Remove-Version {
 
     $dirName = $null
     switch -Regex ($Ver) {
-        '^local-[0-9a-f]{7}$' { $dirName = $Ver }
+        '^local-[0-9a-f]{7}$' { $dirName = $Ver; break }
+        '^frozen-[a-zA-Z0-9._-]+$' { $dirName = $Ver; break }
         '^[0-9a-f]{7,8}$' {
             $hash = $Ver.Substring(0, 7)
             $localDir = Join-Path $script:RocupHome "local-$hash"
@@ -545,9 +546,19 @@ function Remove-Version {
                 if ($found) { $dirName = $found }
                 else        { $dirName = "roc_nightly-$hash" }
             }
+            break
+        }
+        '^[a-zA-Z0-9._-]+$' {
+            $candidate = Join-Path $script:RocupHome "frozen-$Ver"
+            if (Test-Path -LiteralPath $candidate) {
+                $dirName = "frozen-$Ver"
+            } else {
+                throw "error: invalid version '$Ver' (expected 7- or 8-char hash, 'local-<hash>', 'frozen-<name>', or a frozen name)"
+            }
+            break
         }
         default {
-            throw "error: invalid version '$Ver' (expected 7- or 8-char hash, or 'local-<hash>')"
+            throw "error: invalid version '$Ver' (expected 7- or 8-char hash, 'local-<hash>', 'frozen-<name>', or a frozen name)"
         }
     }
 
@@ -1113,6 +1124,32 @@ function Invoke-Rocup {
         }
         '^[+-][0-9]+$'       { Step-Nightly $cmd; Initialize-RocupShims; return }
         '^[0-9a-f]{7,8}$'    { Invoke-HashDispatch $cmd; return }
+        '^frozen-[a-zA-Z0-9._-]+$' {
+            $candidate = Join-Path $script:RocupHome $cmd
+            if (Test-Path -LiteralPath $candidate -PathType Container) {
+                Set-ActiveVersion $cmd
+                Initialize-RocupShims
+                return
+            }
+            [Console]::Error.WriteLine("error: frozen entry '$cmd' does not exist in $script:RocupHome")
+            exit 1
+        }
+        '^[a-zA-Z0-9._-]+$' {
+            $candidate = Join-Path $script:RocupHome "frozen-$cmd"
+            if (Test-Path -LiteralPath $candidate -PathType Container) {
+                Set-ActiveVersion "frozen-$cmd"
+                Initialize-RocupShims
+                return
+            }
+            if (Test-Path -LiteralPath $cmd) {
+                Register-Local $cmd
+                Initialize-RocupShims
+                return
+            }
+            [Console]::Error.WriteLine("error: invalid argument '$cmd'")
+            [Console]::Error.WriteLine((Show-Usage))
+            exit 1
+        }
         default {
             if (Test-Path -LiteralPath $cmd) {
                 Register-Local $cmd
