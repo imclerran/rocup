@@ -152,7 +152,7 @@ do_list() {
     tmp=$(mktemp)
     find "$ROCUP_HOME" -maxdepth 1 -mindepth 1 \
         \( -type d -o -type l \) \
-        \( -name 'roc-alpha4-rolling' -o -name 'roc_nightly-*' -o -name 'local-*' \) -print0 \
+        \( -name 'roc-alpha4-rolling' -o -name 'roc_nightly-*' -o -name 'local-*' -o -name 'frozen-*' \) -print0 \
         | while IFS= read -r -d '' dir; do
             printf "%s %s\n" "$(dir_sort_key "$dir")" "$dir" >> "$tmp"
         done
@@ -186,6 +186,12 @@ do_list() {
                 target=$(local_install_path "$dir")
                 mdy=$(local_mdy "$dir")
                 printf "%s%-7s (%s) <%s>  %s\n" "$marker" "local" "$mdy" "$hash" "$target"
+                ;;
+            frozen-*)
+                local fname mdy
+                fname="${name#frozen-}"
+                mdy=$(local_mdy "$dir")
+                printf "%s%-7s (%s) <%s>\n" "$marker" "frozen" "$mdy" "$fname"
                 ;;
             *)
                 printf "%s%s\n" "$marker" "$name"
