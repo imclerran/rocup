@@ -922,6 +922,47 @@ local_install_path() {
     fi
 }
 
+# validate_freeze_name <name>
+# Returns 0 if <name> is a legal frozen-<name> suffix. Otherwise echoes an
+# error to stderr and returns 1. Rules (per design spec):
+#   - non-empty, matches ^[a-zA-Z0-9._-]+$
+#   - does not start with 'frozen-' (the prefix is added by rocup)
+#   - does not collide with any installed nightly hash or registered local hash
+validate_freeze_name() {
+    local name="$1"
+    if [ -z "$name" ]; then
+        echo "freeze: name is required" >&2
+        return 1
+    fi
+    if ! [[ "$name" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+        echo "freeze: invalid name '$name'; allowed characters: a-z A-Z 0-9 . _ -" >&2
+        return 1
+    fi
+    case "$name" in
+        frozen-*)
+            echo "freeze: do not include the 'frozen-' prefix in the name" >&2
+            return 1
+            ;;
+    esac
+    # Hash-collision check: only reject names that match an actually-installed
+    # 7-char hash (registered local OR installed nightly). 'roc --version'-style
+    # 8-char hashes are not rejected here; if a user types an 8-char name, the
+    # 7-char prefix is what would collide, but 8-char names with no 7-char
+    # equivalent installed pass through. The charset rule already covers
+    # everything except hex collisions.
+    if [[ "$name" =~ ^[0-9a-f]{7}$ ]]; then
+        if [ -e "$ROCUP_HOME/local-$name" ] || [ -L "$ROCUP_HOME/local-$name" ]; then
+            echo "freeze: name '$name' conflicts with an existing version hash; choose another name" >&2
+            return 1
+        fi
+        if [ -n "$(find_nightly_dir "$name")" ]; then
+            echo "freeze: name '$name' conflicts with an existing version hash; choose another name" >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+
 register_local() {
     # $1 = directory containing roc[+roc_language_server] OR path to a roc binary.
     # Registers it as $ROCUP_HOME/local-<7-char-hash-of-abs-path> and activates.
@@ -1136,6 +1177,27 @@ case "$cmd" in
             exit 1
         fi
         prune_nightlies "$2"
+        ;;
+    freeze)
+        shift
+        # Detailed implementation lands in Task 3. For now, validator-only stub.
+        force=0
+        name=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --force) force=1; shift ;;
+                --) shift; name="${1:-}"; shift || true ;;
+                -*) echo "freeze: unknown option '$1'" >&2; exit 1 ;;
+                *) name="$1"; shift ;;
+            esac
+        done
+        validate_freeze_name "$name" || exit 1
+        if [ -e "$ROCUP_HOME/frozen-$name" ] && [ "$force" -ne 1 ]; then
+            echo "freeze: frozen-$name already exists. Use --force to overwrite." >&2
+            exit 1
+        fi
+        echo "freeze: stub (Task 1) — preconditions ok for '$name'" >&2
+        exit 1
         ;;
     *)
         if [[ "$cmd" =~ ^[+-][0-9]+$ ]]; then
