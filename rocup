@@ -338,6 +338,19 @@ remove_version() {
         fi
     fi
 
+    if [ -z "$fallback" ]; then
+        : > "$tmp"
+        find "$ROCUP_HOME" -maxdepth 1 -mindepth 1 \
+            \( -type d -o -type l \) \
+            -name 'frozen-*' -print0 \
+            | while IFS= read -r -d '' dir; do
+                printf "%s %s\n" "$(dir_sort_key "$dir")" "$dir" >> "$tmp"
+            done
+        if [ -s "$tmp" ]; then
+            fallback=$(sort "$tmp" | tail -n1 | cut -d' ' -f2-)
+        fi
+    fi
+
     rm -f "$tmp"
 
     if [ -n "$fallback" ]; then
