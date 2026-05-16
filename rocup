@@ -249,6 +249,14 @@ remove_version() {
             fi
             dir_name="$ver"
             ;;
+        frozen-*)
+            local fname="${ver#frozen-}"
+            if ! [[ "$fname" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+                echo "error: invalid frozen entry name '$ver'" >&2
+                exit 1
+            fi
+            dir_name="$ver"
+            ;;
         *)
             if [[ "$ver" =~ ^[0-9a-f]{7,8}$ ]]; then
                 # 'roc --version' emits 8-char; normalize to 7 to match
@@ -265,8 +273,10 @@ remove_version() {
                         dir_name="roc_nightly-$hash"
                     fi
                 fi
+            elif [ -d "$ROCUP_HOME/frozen-$ver" ]; then
+                dir_name="frozen-$ver"
             else
-                echo "error: invalid version '$ver' (expected 'alpha4', 7- or 8-char hash, or 'local-<hash>')" >&2
+                echo "error: invalid version '$ver' (expected 'alpha4', 7- or 8-char hash, 'local-<hash>', 'frozen-<name>', or a frozen name)" >&2
                 exit 1
             fi
             ;;
@@ -1307,6 +1317,12 @@ case "$cmd" in
                 install_nightly "$hash" "$platform"
                 ensure_global_symlinks
             fi
+        elif [[ "$cmd" == frozen-* ]] && [ -d "$ROCUP_HOME/$cmd" ]; then
+            activate "$cmd"
+            ensure_global_symlinks
+        elif [[ "$cmd" =~ ^[a-zA-Z0-9._-]+$ ]] && [ -d "$ROCUP_HOME/frozen-$cmd" ]; then
+            activate "frozen-$cmd"
+            ensure_global_symlinks
         elif [ -e "$cmd" ]; then
             register_local "$cmd"
             ensure_global_symlinks
