@@ -1068,6 +1068,7 @@ function Show-Usage {
         @{ Label = 'local';        Desc = "activate a registered local roc build. With one local registered, activate it; with several, activate the most recently built one (newest roc.exe mtime). Errors if no locals are registered." }
         @{ Label = '+N | -N';      Desc = "step N nightlies newer (+) or older (-) than the active one. Requires the active version to be a nightly." }
         @{ Label = 'list';         Desc = "show installed versions and mark the active one." }
+        @{ Label = 'freeze <name>'; Desc = "snapshot the active local build into `$env:ROCUP_HOME\frozen-<name>\ as real files (not junctions). Requires an active local. <name> matches [a-zA-Z0-9._-] and must not collide with an existing hash. Pass --force to overwrite an existing frozen entry. The original local-<hash> registration is left intact; active becomes frozen-<name>." }
         @{ Label = 'remove <ver>'; Desc = "delete a version (7- or 8-char hash, or local-<hash>)." }
         @{ Label = 'prune <N>';    Desc = "keep the N most recent nightlies; delete older ones." }
     )
@@ -1077,7 +1078,7 @@ function Show-Usage {
     # Synopsis line. 14-space hanging indent so continuation lines align
     # under '[latest'.
     $out.Add( (Format-Wrapped -Width $width -FirstPrefix '' -ContPrefix (' ' * 14) `
-        -Text 'usage: rocup [latest | <hash> | <path> | local | +N | -N | list | remove <ver> | prune <N>]') )
+        -Text 'usage: rocup [latest | <hash> | <path> | local | +N | -N | list | freeze <name> | remove <ver> | prune <N>]') )
     $out.Add('')
 
     foreach ($c in $cmds) {
