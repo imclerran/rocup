@@ -56,7 +56,7 @@ usage() {
     # Synopsis line. Wraps with a 14-space hanging indent so continuation
     # lines align under '[alpha4'.
     wrap_text "$width" "" "              " \
-        "usage: rocup [alpha4 | latest | <hash> | <path> | local | +N | -N | list | remove <ver> | prune <N>]"
+        "usage: rocup [alpha4 | latest | <hash> | <path> | local | +N | -N | list | freeze <name> | remove <ver> | prune <N>]"
     echo
 
     # Each command is rendered as: 2-space indent, label padded to 16 cols,
@@ -101,9 +101,14 @@ usage() {
         "show installed versions (alpha4, nightlies, locals) and mark the active one. Local entries show their resolved path."
     echo
 
+    first=$(printf "  %-16s" "freeze <name>")
+    wrap_text "$width" "$first" "$cont" \
+        "snapshot the active local build into \$ROCUP_HOME/frozen-<name>/ as real files (not symlinks). Requires an active local. <name> matches [a-zA-Z0-9._-] and must not collide with an existing hash. Pass --force to overwrite an existing frozen entry. The original local-<hash> registration is left intact; active becomes frozen-<name>."
+    echo
+
     first=$(printf "  %-16s" "remove <ver>")
     wrap_text "$width" "$first" "$cont" \
-        "delete a version (alpha4, 7- or 8-char hash, or local-<hash>). A bare hash resolves to a registered local first, otherwise a nightly. If the removed version was active, the most recent remaining one becomes active. Removing a local only drops the registration; the actual local files are untouched."
+        "delete a version (alpha4, 7- or 8-char hash, local-<hash>, frozen-<name>, or a bare frozen name). A bare hash resolves to a registered local first, otherwise a nightly. If the removed version was active, the most recent remaining one becomes active. Removing a local only drops the registration; the actual local files are untouched."
     echo
 
     first=$(printf "  %-16s" "prune <N>")
@@ -152,7 +157,7 @@ do_list() {
     tmp=$(mktemp)
     find "$ROCUP_HOME" -maxdepth 1 -mindepth 1 \
         \( -type d -o -type l \) \
-        \( -name 'roc-alpha4-rolling' -o -name 'roc_nightly-*' -o -name 'local-*' \) -print0 \
+        \( -name 'roc-alpha4-rolling' -o -name 'roc_nightly-*' -o -name 'local-*' -o -name 'frozen-*' \) -print0 \
         | while IFS= read -r -d '' dir; do
             printf "%s %s\n" "$(dir_sort_key "$dir")" "$dir" >> "$tmp"
         done
@@ -186,6 +191,12 @@ do_list() {
                 target=$(local_install_path "$dir")
                 mdy=$(local_mdy "$dir")
                 printf "%s%-7s (%s) <%s>  %s\n" "$marker" "local" "$mdy" "$hash" "$target"
+                ;;
+            frozen-*)
+                local fname mdy
+                fname="${name#frozen-}"
+                mdy=$(local_mdy "$dir")
+                printf "%s%-7s (%s) <%s>\n" "$marker" "frozen" "$mdy" "$fname"
                 ;;
             *)
                 printf "%s%s\n" "$marker" "$name"
@@ -243,6 +254,14 @@ remove_version() {
             fi
             dir_name="$ver"
             ;;
+        frozen-*)
+            local fname="${ver#frozen-}"
+            if ! [[ "$fname" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+                echo "error: invalid frozen entry name '$ver'" >&2
+                exit 1
+            fi
+            dir_name="$ver"
+            ;;
         *)
             if [[ "$ver" =~ ^[0-9a-f]{7,8}$ ]]; then
                 # 'roc --version' emits 8-char; normalize to 7 to match
@@ -259,8 +278,10 @@ remove_version() {
                         dir_name="roc_nightly-$hash"
                     fi
                 fi
+            elif [ -d "$ROCUP_HOME/frozen-$ver" ]; then
+                dir_name="frozen-$ver"
             else
-                echo "error: invalid version '$ver' (expected 'alpha4', 7- or 8-char hash, or 'local-<hash>')" >&2
+                echo "error: invalid version '$ver' (expected 'alpha4', 7- or 8-char hash, 'local-<hash>', 'frozen-<name>', or a frozen name)" >&2
                 exit 1
             fi
             ;;
@@ -314,6 +335,19 @@ remove_version() {
         find "$ROCUP_HOME" -maxdepth 1 -mindepth 1 \
             \( -type d -o -type l \) \
             -name 'local-*' -print0 \
+            | while IFS= read -r -d '' dir; do
+                printf "%s %s\n" "$(dir_sort_key "$dir")" "$dir" >> "$tmp"
+            done
+        if [ -s "$tmp" ]; then
+            fallback=$(sort "$tmp" | tail -n1 | cut -d' ' -f2-)
+        fi
+    fi
+
+    if [ -z "$fallback" ]; then
+        : > "$tmp"
+        find "$ROCUP_HOME" -maxdepth 1 -mindepth 1 \
+            \( -type d -o -type l \) \
+            -name 'frozen-*' -print0 \
             | while IFS= read -r -d '' dir; do
                 printf "%s %s\n" "$(dir_sort_key "$dir")" "$dir" >> "$tmp"
             done
@@ -922,6 +956,146 @@ local_install_path() {
     fi
 }
 
+# validate_freeze_name <name>
+# Returns 0 if <name> is a legal frozen-<name> suffix. Otherwise echoes an
+# error to stderr and returns 1. Rules (per design spec):
+#   - non-empty, matches ^[a-zA-Z0-9._-]+$
+#   - does not start with 'frozen-' (the prefix is added by rocup)
+#   - does not collide with any installed nightly hash or registered local hash
+validate_freeze_name() {
+    local name="$1"
+    if [ -z "$name" ]; then
+        echo "freeze: name is required" >&2
+        return 1
+    fi
+    if ! [[ "$name" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+        echo "freeze: invalid name '$name'; allowed characters: a-z A-Z 0-9 . _ -" >&2
+        return 1
+    fi
+    case "$name" in
+        frozen-*)
+            echo "freeze: do not include the 'frozen-' prefix in the name" >&2
+            return 1
+            ;;
+    esac
+    # Hash-collision check: only reject names that match an actually-installed
+    # 7-char hash (registered local OR installed nightly). 'roc --version'-style
+    # 8-char hashes are not rejected here; if a user types an 8-char name, the
+    # 7-char prefix is what would collide, but 8-char names with no 7-char
+    # equivalent installed pass through. The charset rule already covers
+    # everything except hex collisions.
+    if [[ "$name" =~ ^[0-9a-f]{7}$ ]]; then
+        if [ -e "$ROCUP_HOME/local-$name" ] || [ -L "$ROCUP_HOME/local-$name" ]; then
+            echo "freeze: name '$name' conflicts with an existing version hash; choose another name" >&2
+            return 1
+        fi
+        if [ -n "$(find_nightly_dir "$name")" ]; then
+            echo "freeze: name '$name' conflicts with an existing version hash; choose another name" >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# do_freeze <name> [--force]
+# Snapshots the currently-active local-<hash> build into $ROCUP_HOME/frozen-<name>/.
+# Preconditions: active version exists and is a local-<hash> entry; the local
+# entry resolves (not dangling); the resolved dir contains a roc binary.
+# Copies roc (and, on macOS/Linux, roc_language_server if present in dir-mode)
+# as real files with symlinks dereferenced, then activates frozen-<name>. The
+# original local-<hash> registration is left intact.
+do_freeze() {
+    local name="" force=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --force) force=1; shift ;;
+            --) shift; name="${1:-}"; break ;;
+            -*) echo "freeze: unknown option '$1'" >&2; return 1 ;;
+            *)
+                if [ -n "$name" ]; then
+                    echo "freeze: too many arguments (already have name '$name', also got '$1')" >&2
+                    return 1
+                fi
+                name="$1"; shift
+                ;;
+        esac
+    done
+
+    validate_freeze_name "$name" || return 1
+
+    # Precondition: an active version exists.
+    if [ ! -L "$ROCUP_HOME/roc" ]; then
+        echo "freeze: no active version" >&2
+        return 1
+    fi
+    local active
+    active=$(basename "$(readlink "$ROCUP_HOME/roc")")
+
+    # Precondition: active is a local-<hash> entry.
+    case "$active" in
+        local-*) ;;
+        *)
+            echo "freeze: active version is $active; freeze requires an active local build" >&2
+            return 1
+            ;;
+    esac
+
+    # Resolve through the local registration. Two shapes are possible:
+    #   Dir-mode  : $entry is itself a symlink to the build directory.
+    #   File-mode : $entry is a real directory containing a 'roc' symlink that
+    #               points at a standalone binary in the user's tree. (Unix only.)
+    # In both shapes, "$entry/roc" transitively resolves to the binary.
+    local entry="$ROCUP_HOME/$active"
+    local source_dir
+    if [ -L "$entry" ]; then
+        # Dir-mode dangling check: -e on a dangling symlink is false.
+        if [ ! -e "$entry" ]; then
+            echo "freeze: cannot resolve active local $active; the source directory may have been moved or deleted" >&2
+            return 1
+        fi
+        source_dir=$(readlink "$entry")
+    elif [ -d "$entry" ] && [ -L "$entry/roc" ]; then
+        if [ ! -e "$entry/roc" ]; then
+            echo "freeze: cannot resolve active local $active; the source directory may have been moved or deleted" >&2
+            return 1
+        fi
+        source_dir=$(dirname "$(readlink "$entry/roc")")
+    else
+        echo "freeze: cannot resolve active local $active; unexpected registration shape" >&2
+        return 1
+    fi
+    if [ ! -x "$entry/roc" ]; then
+        echo "freeze: roc binary not found in $source_dir" >&2
+        return 1
+    fi
+
+    # Collision handling.
+    local dest="$ROCUP_HOME/frozen-$name"
+    if [ -e "$dest" ] || [ -L "$dest" ]; then
+        if [ "$force" -ne 1 ]; then
+            echo "freeze: frozen-$name already exists. Use --force to overwrite." >&2
+            return 1
+        fi
+        rm -rf "$dest"
+    fi
+
+    # Copy. -L dereferences symlinks so the result is a real file even when
+    # the source roc was itself a symlink (file-mode registration). -p
+    # preserves the executable bit.
+    mkdir -p "$dest"
+    cp -Lp "$entry/roc" "$dest/roc"
+    # Language-server policy:
+    #   - dir-mode: copy roc_language_server if it sits next to roc in the build dir.
+    #   - file-mode: the user explicitly registered only the roc binary; do not
+    #     reach back into the source dir to pick up anything else.
+    if [ -L "$entry" ] && [ -e "$entry/roc_language_server" ]; then
+        cp -Lp "$entry/roc_language_server" "$dest/roc_language_server"
+    fi
+    echo ".. frozen $active as frozen-$name ($source_dir)"
+
+    activate "frozen-$name"
+}
+
 register_local() {
     # $1 = directory containing roc[+roc_language_server] OR path to a roc binary.
     # Registers it as $ROCUP_HOME/local-<7-char-hash-of-abs-path> and activates.
@@ -1137,6 +1311,16 @@ case "$cmd" in
         fi
         prune_nightlies "$2"
         ;;
+    freeze)
+        if [ $# -lt 2 ]; then
+            echo "error: 'freeze' requires a name (e.g. 'rocup freeze myfeature')" >&2
+            usage >&2
+            exit 1
+        fi
+        shift
+        do_freeze "$@"
+        ensure_global_symlinks
+        ;;
     *)
         if [[ "$cmd" =~ ^[+-][0-9]+$ ]]; then
             step_nightly "$cmd"
@@ -1156,6 +1340,12 @@ case "$cmd" in
                 install_nightly "$hash" "$platform"
                 ensure_global_symlinks
             fi
+        elif [[ "$cmd" == frozen-* ]] && [ -d "$ROCUP_HOME/$cmd" ]; then
+            activate "$cmd"
+            ensure_global_symlinks
+        elif [[ "$cmd" =~ ^[a-zA-Z0-9._-]+$ ]] && [ -d "$ROCUP_HOME/frozen-$cmd" ]; then
+            activate "frozen-$cmd"
+            ensure_global_symlinks
         elif [ -e "$cmd" ]; then
             register_local "$cmd"
             ensure_global_symlinks

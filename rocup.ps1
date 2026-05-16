@@ -512,10 +512,11 @@ function Invoke-HashDispatch {
 }
 
 function Get-FallbackVersion {
-    # Pick the most recent nightly to fall back to; else most recent local.
-    # Returns the directory name (e.g. 'roc_nightly-2025-10-25-2b89aee') or ''.
+    # Pick the most recent nightly; else most recent local; else most recent frozen.
+    # Returns the directory name or ''.
     $dirs = @(Get-InstalledVersionDirs)
     if ($dirs.Count -eq 0) { return '' }
+
     $nightlies = @($dirs | Where-Object { $_.Name -like 'roc_nightly-*' })
     if ($nightlies.Count -gt 0) {
         $best = $nightlies | Sort-Object { Get-DirSortKey $_.FullName } -Descending | Select-Object -First 1
@@ -526,6 +527,11 @@ function Get-FallbackVersion {
         $best = $locals | Sort-Object { Get-DirSortKey $_.FullName } -Descending | Select-Object -First 1
         return $best.Name
     }
+    $frozens = @($dirs | Where-Object { $_.Name -like 'frozen-*' })
+    if ($frozens.Count -gt 0) {
+        $best = $frozens | Sort-Object { Get-DirSortKey $_.FullName } -Descending | Select-Object -First 1
+        return $best.Name
+    }
     return ''
 }
 
@@ -534,7 +540,8 @@ function Remove-Version {
 
     $dirName = $null
     switch -Regex ($Ver) {
-        '^local-[0-9a-f]{7}$' { $dirName = $Ver }
+        '^local-[0-9a-f]{7}$' { $dirName = $Ver; break }
+        '^frozen-[a-zA-Z0-9._-]+$' { $dirName = $Ver; break }
         '^[0-9a-f]{7,8}$' {
             $hash = $Ver.Substring(0, 7)
             $localDir = Join-Path $script:RocupHome "local-$hash"
@@ -545,9 +552,19 @@ function Remove-Version {
                 if ($found) { $dirName = $found }
                 else        { $dirName = "roc_nightly-$hash" }
             }
+            break
+        }
+        '^[a-zA-Z0-9._-]+$' {
+            $candidate = Join-Path $script:RocupHome "frozen-$Ver"
+            if (Test-Path -LiteralPath $candidate) {
+                $dirName = "frozen-$Ver"
+            } else {
+                throw "error: invalid version '$Ver' (expected 7- or 8-char hash, 'local-<hash>', 'frozen-<name>', or a frozen name)"
+            }
+            break
         }
         default {
-            throw "error: invalid version '$Ver' (expected 7- or 8-char hash, or 'local-<hash>')"
+            throw "error: invalid version '$Ver' (expected 7- or 8-char hash, 'local-<hash>', 'frozen-<name>', or a frozen name)"
         }
     }
 
@@ -776,6 +793,93 @@ function Invoke-Local {
     Set-ActiveVersion $best.Name
 }
 
+function Test-FreezeName {
+    # Returns the name on success; throws on failure. Rules per design spec:
+    #   - non-empty, matches ^[a-zA-Z0-9._-]+$
+    #   - does not start with 'frozen-'
+    #   - does not collide with any installed nightly or registered local hash
+    param([Parameter(Mandatory=$false)][string] $Name)
+    if (-not $Name) {
+        throw "freeze: name is required"
+    }
+    if ($Name -notmatch '^[a-zA-Z0-9._-]+$') {
+        throw "freeze: invalid name '$Name'; allowed characters: a-z A-Z 0-9 . _ -"
+    }
+    if ($Name -like 'frozen-*') {
+        throw "freeze: do not include the 'frozen-' prefix in the name"
+    }
+    if ($Name -match '^[0-9a-f]{7}$') {
+        $localPath = Join-Path $script:RocupHome "local-$Name"
+        if (Test-Path -LiteralPath $localPath) {
+            throw "freeze: name '$Name' conflicts with an existing version hash; choose another name"
+        }
+        $nightly = Find-NightlyDir $Name
+        if ($nightly) {
+            throw "freeze: name '$Name' conflicts with an existing version hash; choose another name"
+        }
+    }
+    $Name
+}
+
+function Invoke-Freeze {
+    param(
+        [Parameter(Mandatory)][string[]] $Argv
+    )
+    # Argv = the args AFTER 'freeze' (i.e., $name and any flags).
+    $force = $false
+    $name  = ''
+    for ($i = 0; $i -lt $Argv.Count; $i++) {
+        $a = $Argv[$i]
+        if ($a -eq '--force') {
+            $force = $true
+        } elseif ($a.StartsWith('-')) {
+            throw "freeze: unknown option '$a'"
+        } elseif (-not $name) {
+            $name = $a
+        } else {
+            throw "freeze: too many arguments (already have name '$name', also got '$a')"
+        }
+    }
+
+    $null = Test-FreezeName $name
+
+    $rocLink = Join-Path $script:RocupHome 'roc'
+    if (-not (Test-IsJunction $rocLink)) {
+        throw "freeze: no active version"
+    }
+    $linkTarget = (Get-Item -LiteralPath $rocLink -Force).Target | Select-Object -First 1
+    $active = Split-Path -Leaf $linkTarget
+
+    if ($active -notlike 'local-*') {
+        throw "freeze: active version is $active; freeze requires an active local build"
+    }
+
+    $entry = Join-Path $script:RocupHome $active
+    $resolved = Get-LocalInstallPath $entry
+    if (-not $resolved -or -not (Test-Path -LiteralPath $resolved -PathType Container)) {
+        throw "freeze: cannot resolve active local $active; the source directory may have been moved or deleted"
+    }
+    $srcExe = Join-Path $resolved 'roc.exe'
+    if (-not (Test-Path -LiteralPath $srcExe -PathType Leaf)) {
+        throw "freeze: roc binary not found in $resolved"
+    }
+
+    $dest = Join-Path $script:RocupHome "frozen-$name"
+    if (Test-Path -LiteralPath $dest) {
+        if (-not $force) {
+            throw "freeze: frozen-$name already exists. Use --force to overwrite."
+        }
+        Remove-Item -LiteralPath $dest -Recurse -Force
+    }
+
+    New-Item -ItemType Directory -Path $dest -Force | Out-Null
+    Copy-Item -LiteralPath $srcExe -Destination (Join-Path $dest 'roc.exe') -Force
+
+    Write-Host ".. frozen $active as frozen-$name ($resolved)"
+
+    Set-ActiveVersion "frozen-$name"
+}
+
 function Register-Local {
     param([Parameter(Mandatory)][string] $InputPath)
 
@@ -819,7 +923,7 @@ function Get-InstalledVersionDirs {
             $_.PSIsContainer -or $_.LinkType -eq 'Junction'
         } |
         Where-Object {
-            $_.Name -like 'roc_nightly-*' -or $_.Name -like 'local-*'
+            $_.Name -like 'roc_nightly-*' -or $_.Name -like 'local-*' -or $_.Name -like 'frozen-*'
         }
 }
 
@@ -874,6 +978,19 @@ function Invoke-List {
                 }
                 $mdy = $mtime.ToString('MM/dd/yyyy')
                 Write-Host ("{0}{1,-7} ({2}) <{3}>  {4}" -f $marker, 'local', $mdy, $hash, $target)
+                break
+            }
+            '^frozen-(.+)$' {
+                $fname = $Matches[1]
+                $resolved = Get-Item -LiteralPath $row.Path -Force
+                $exe = Join-Path $resolved.FullName 'roc.exe'
+                $mtime = if (Test-Path -LiteralPath $exe) {
+                    (Get-Item -LiteralPath $exe).LastWriteTime
+                } else {
+                    $resolved.LastWriteTime
+                }
+                $mdy = $mtime.ToString('MM/dd/yyyy')
+                Write-Host ("{0}{1,-7} ({2}) <{3}>" -f $marker, 'frozen', $mdy, $fname)
                 break
             }
             default {
@@ -951,7 +1068,8 @@ function Show-Usage {
         @{ Label = 'local';        Desc = "activate a registered local roc build. With one local registered, activate it; with several, activate the most recently built one (newest roc.exe mtime). Errors if no locals are registered." }
         @{ Label = '+N | -N';      Desc = "step N nightlies newer (+) or older (-) than the active one. Requires the active version to be a nightly." }
         @{ Label = 'list';         Desc = "show installed versions and mark the active one." }
-        @{ Label = 'remove <ver>'; Desc = "delete a version (7- or 8-char hash, or local-<hash>)." }
+        @{ Label = 'freeze <name>'; Desc = "snapshot the active local build into `$env:ROCUP_HOME\frozen-<name>\ as real files (not junctions). Requires an active local. <name> matches [a-zA-Z0-9._-] and must not collide with an existing hash. Pass --force to overwrite an existing frozen entry. The original local-<hash> registration is left intact; active becomes frozen-<name>." }
+        @{ Label = 'remove <ver>'; Desc = "delete a version (7- or 8-char hash, local-<hash>, frozen-<name>, or a bare frozen name)." }
         @{ Label = 'prune <N>';    Desc = "keep the N most recent nightlies; delete older ones." }
     )
 
@@ -960,7 +1078,7 @@ function Show-Usage {
     # Synopsis line. 14-space hanging indent so continuation lines align
     # under '[latest'.
     $out.Add( (Format-Wrapped -Width $width -FirstPrefix '' -ContPrefix (' ' * 14) `
-        -Text 'usage: rocup [latest | <hash> | <path> | local | +N | -N | list | remove <ver> | prune <N>]') )
+        -Text 'usage: rocup [latest | <hash> | <path> | local | +N | -N | list | freeze <name> | remove <ver> | prune <N>]') )
     $out.Add('')
 
     foreach ($c in $cmds) {
@@ -1003,8 +1121,42 @@ function Invoke-Rocup {
             return
         }
         '^latest$'           { Invoke-Latest; return }
+        '^freeze$' {
+            if ($argv.Count -lt 2) {
+                throw "error: 'freeze' requires a name (e.g. 'rocup freeze myfeature')"
+            }
+            Invoke-Freeze -Argv $argv[1..($argv.Count - 1)]
+            Initialize-RocupShims
+            return
+        }
         '^[+-][0-9]+$'       { Step-Nightly $cmd; Initialize-RocupShims; return }
         '^[0-9a-f]{7,8}$'    { Invoke-HashDispatch $cmd; return }
+        '^frozen-[a-zA-Z0-9._-]+$' {
+            $candidate = Join-Path $script:RocupHome $cmd
+            if (Test-Path -LiteralPath $candidate -PathType Container) {
+                Set-ActiveVersion $cmd
+                Initialize-RocupShims
+                return
+            }
+            [Console]::Error.WriteLine("error: frozen entry '$cmd' does not exist in $script:RocupHome")
+            exit 1
+        }
+        '^[a-zA-Z0-9._-]+$' {
+            $candidate = Join-Path $script:RocupHome "frozen-$cmd"
+            if (Test-Path -LiteralPath $candidate -PathType Container) {
+                Set-ActiveVersion "frozen-$cmd"
+                Initialize-RocupShims
+                return
+            }
+            if (Test-Path -LiteralPath $cmd) {
+                Register-Local $cmd
+                Initialize-RocupShims
+                return
+            }
+            [Console]::Error.WriteLine("error: invalid argument '$cmd'")
+            [Console]::Error.WriteLine((Show-Usage))
+            exit 1
+        }
         default {
             if (Test-Path -LiteralPath $cmd) {
                 Register-Local $cmd
