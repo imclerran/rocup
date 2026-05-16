@@ -906,7 +906,7 @@ function Get-InstalledVersionDirs {
             $_.PSIsContainer -or $_.LinkType -eq 'Junction'
         } |
         Where-Object {
-            $_.Name -like 'roc_nightly-*' -or $_.Name -like 'local-*'
+            $_.Name -like 'roc_nightly-*' -or $_.Name -like 'local-*' -or $_.Name -like 'frozen-*'
         }
 }
 
@@ -961,6 +961,19 @@ function Invoke-List {
                 }
                 $mdy = $mtime.ToString('MM/dd/yyyy')
                 Write-Host ("{0}{1,-7} ({2}) <{3}>  {4}" -f $marker, 'local', $mdy, $hash, $target)
+                break
+            }
+            '^frozen-(.+)$' {
+                $fname = $Matches[1]
+                $resolved = Get-Item -LiteralPath $row.Path -Force
+                $exe = Join-Path $resolved.FullName 'roc.exe'
+                $mtime = if (Test-Path -LiteralPath $exe) {
+                    (Get-Item -LiteralPath $exe).LastWriteTime
+                } else {
+                    $resolved.LastWriteTime
+                }
+                $mdy = $mtime.ToString('MM/dd/yyyy')
+                Write-Host ("{0}{1,-7} ({2}) <{3}>" -f $marker, 'frozen', $mdy, $fname)
                 break
             }
             default {
