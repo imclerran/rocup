@@ -776,6 +776,34 @@ function Invoke-Local {
     Set-ActiveVersion $best.Name
 }
 
+function Test-FreezeName {
+    # Returns the name on success; throws on failure. Rules per design spec:
+    #   - non-empty, matches ^[a-zA-Z0-9._-]+$
+    #   - does not start with 'frozen-'
+    #   - does not collide with any installed nightly or registered local hash
+    param([Parameter(Mandatory=$false)][string] $Name)
+    if (-not $Name) {
+        throw "freeze: name is required"
+    }
+    if ($Name -notmatch '^[a-zA-Z0-9._-]+$') {
+        throw "freeze: invalid name '$Name'; allowed characters: a-z A-Z 0-9 . _ -"
+    }
+    if ($Name -like 'frozen-*') {
+        throw "freeze: do not include the 'frozen-' prefix in the name"
+    }
+    if ($Name -match '^[0-9a-f]{7}$') {
+        $localPath = Join-Path $script:RocupHome "local-$Name"
+        if (Test-Path -LiteralPath $localPath) {
+            throw "freeze: name '$Name' conflicts with an existing version hash; choose another name"
+        }
+        $nightly = Find-NightlyDir $Name
+        if ($nightly) {
+            throw "freeze: name '$Name' conflicts with an existing version hash; choose another name"
+        }
+    }
+    $Name
+}
+
 function Register-Local {
     param([Parameter(Mandatory)][string] $InputPath)
 
@@ -1003,6 +1031,26 @@ function Invoke-Rocup {
             return
         }
         '^latest$'           { Invoke-Latest; return }
+        '^freeze$' {
+            if ($argv.Count -lt 2) {
+                throw "error: 'freeze' requires a name (e.g. 'rocup freeze myfeature')"
+            }
+            # Stub for Task 11 — replaced in Task 12.
+            $force = $false
+            $name  = ''
+            for ($i = 1; $i -lt $argv.Count; $i++) {
+                if     ($argv[$i] -eq '--force') { $force = $true }
+                elseif ($argv[$i].StartsWith('-')) { throw "freeze: unknown option '$($argv[$i])'" }
+                elseif (-not $name) { $name = $argv[$i] }
+                else  { throw "freeze: too many arguments" }
+            }
+            $null = Test-FreezeName $name
+            $dest = Join-Path $script:RocupHome "frozen-$name"
+            if ((Test-Path -LiteralPath $dest) -and -not $force) {
+                throw "freeze: frozen-$name already exists. Use --force to overwrite."
+            }
+            throw "freeze: stub (Task 11) — preconditions ok for '$name'"
+        }
         '^[+-][0-9]+$'       { Step-Nightly $cmd; Initialize-RocupShims; return }
         '^[0-9a-f]{7,8}$'    { Invoke-HashDispatch $cmd; return }
         default {
