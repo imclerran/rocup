@@ -56,7 +56,7 @@ usage() {
     # Synopsis line. Wraps with a 14-space hanging indent so continuation
     # lines align under '[alpha4'.
     wrap_text "$width" "" "              " \
-        "usage: rocup [alpha4 | latest | <hash> | <path> | local | +N | -N | list | remove <ver> | prune <N>]"
+        "usage: rocup [alpha4 | latest | <hash> | <path> | local | +N | -N | list | freeze <name> | remove <ver> | prune <N>]"
     echo
 
     # Each command is rendered as: 2-space indent, label padded to 16 cols,
@@ -99,6 +99,11 @@ usage() {
     first=$(printf "  %-16s" "list")
     wrap_text "$width" "$first" "$cont" \
         "show installed versions (alpha4, nightlies, locals) and mark the active one. Local entries show their resolved path."
+    echo
+
+    first=$(printf "  %-16s" "freeze <name>")
+    wrap_text "$width" "$first" "$cont" \
+        "snapshot the active local build into \$ROCUP_HOME/frozen-<name>/ as real files (not symlinks). Requires an active local. <name> matches [a-zA-Z0-9._-] and must not collide with an existing hash. Pass --force to overwrite an existing frozen entry. The original local-<hash> registration is left intact; active becomes frozen-<name>."
     echo
 
     first=$(printf "  %-16s" "remove <ver>")
