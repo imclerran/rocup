@@ -486,9 +486,11 @@ install_alpha4() {
 
 month_name_to_num() {
     # Nightly tags use the full month name ("January", "February", ...). Some
-    # older / inconsistent tooling has used 3-letter abbreviations ("Jan", ...)
-    # so accept both forms.
+    # newer releases use a 2-digit month number ("08", ...), and some older /
+    # inconsistent tooling has used 3-letter abbreviations ("Jan", ...). Accept
+    # all three forms.
     case "$1" in
+        0[1-9]|1[0-2])  echo "$1" ;;
         Jan|January)    echo 01 ;;
         Feb|February)   echo 02 ;;
         Mar|March)      echo 03 ;;
@@ -509,8 +511,9 @@ month_name_to_num() {
 }
 
 # parse_tag_date <tag>
-# Tag format: nightly-YYYY-Mmm-DD-<hash>. Echoes YYYY-MM-DD on success,
-# prints an error and returns 1 on malformed input.
+# Tag format: nightly-YYYY-MM-DD-<hash>. Newer releases use a 2-digit month
+# number; older releases used the full month name (or a 3-letter abbreviation).
+# Echoes YYYY-MM-DD on success, prints an error and returns 1 on malformed input.
 parse_tag_date() {
     local tag="$1"
     local _prefix year mon_name day t_hash
