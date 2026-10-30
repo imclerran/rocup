@@ -66,10 +66,11 @@ else
 fi
 line="export PATH=\"$path_dir:\$PATH\""
 
-# add_path_line <file> <line>: appends the line behind a marker if missing.
+# add_path_line <file> <line>: appends the line behind a marker; returns 1 if
+# it was already there.
 add_path_line() {
     if [ -f "$1" ] && grep -Fxq "$2" "$1"; then
-        return 0
+        return 1
     fi
     mkdir -p "$(dirname "$1")"
     printf '\n# rocup\n%s\n' "$2" >> "$1"
@@ -99,8 +100,9 @@ if [ "$on_path" = 0 ] && [ "${ROCUP_NO_MODIFY_PATH:-}" != "1" ]; then
         echo ".. could not detect your shell; add $BIN_DIR to PATH yourself:"
         echo "     $line"
     elif ask ".. add $BIN_DIR to PATH in $files? [Y/n]" y; then
-        for f in $files; do add_path_line "$f" "$line"; done
-        restart_note=1
+        for f in $files; do
+            if add_path_line "$f" "$line"; then restart_note=1; fi
+        done
     else
         echo ".. skipped; add $BIN_DIR to PATH yourself:"
         echo "     $line"
