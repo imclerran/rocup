@@ -73,6 +73,7 @@ function Get-Mtime {
 function Convert-MonthNameToNumber {
     param([Parameter(Mandatory)][string] $Name)
     switch ($Name) {
+        { $_ -match '^(0[1-9]|1[0-2])$' } { return $Name }
         { $_ -in 'Jan','January' }      { return '01' }
         { $_ -in 'Feb','February' }     { return '02' }
         { $_ -in 'Mar','March' }        { return '03' }
@@ -91,7 +92,7 @@ function Convert-MonthNameToNumber {
 
 function ConvertFrom-NightlyTag {
     param([Parameter(Mandatory)][string] $Tag)
-    # Tag format: nightly-YYYY-Mmm-DD-<hash>
+    # Tag format: nightly-YYYY-MM-DD-<hash>. Older tags used a month name.
     $parts = $Tag -split '-'
     if ($parts.Count -lt 5 -or $parts[0] -ne 'nightly') {
         throw "error: unexpected nightly tag format: $Tag"
