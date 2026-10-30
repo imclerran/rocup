@@ -26,12 +26,18 @@ remote_url=$(git -C "$repo_root" config --get remote.origin.url 2>/dev/null || e
 repo_slug=$(echo "$remote_url" | sed -E 's|.*github\.com[:/]([^/]+/[^/.]+)(\.git)?$|\1|')
 [ -n "$repo_slug" ] || repo_slug="imclerran/rocup"
 
+# In CI, a fork PR checks out the base repo but the branch lives on the fork.
+if [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "$GITHUB_EVENT_PATH" ] && command -v jq >/dev/null 2>&1; then
+    head_repo=$(jq -r '.pull_request.head.repo.full_name // empty' "$GITHUB_EVENT_PATH")
+    [ -z "$head_repo" ] || repo_slug="$head_repo"
+fi
+
 # Run installer in an isolated dir. ROCUP_PREFIX overrides /usr/local/bin so
 # no sudo is required.
 log="$TEST_TMPDIR/install.log"
+rc=0
 ROCUP_REPO="$repo_slug" ROCUP_BRANCH="$branch" ROCUP_ASSUME_YES=1 \
-    sh "$repo_root/install.sh" > "$log" 2>&1
-rc=$?
+    sh "$repo_root/install.sh" > "$log" 2>&1 || rc=$?
 if [ $rc -ne 0 ]; then
     echo "FAIL: install.sh exited $rc. Log:" >&2
     cat "$log" >&2

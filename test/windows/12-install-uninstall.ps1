@@ -33,6 +33,13 @@ if ($remoteUrl -match 'github\.com[:/]([^/]+)/([^/.]+)') {
     $repoSlug = 'imclerran/rocup'
 }
 
+# In CI, a fork PR checks out the base repo but the branch lives on the fork.
+if ($env:GITHUB_EVENT_PATH -and (Test-Path -LiteralPath $env:GITHUB_EVENT_PATH)) {
+    $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+    $headRepo = $event.pull_request.head.repo.full_name
+    if ($headRepo) { $repoSlug = $headRepo }
+}
+
 # Snapshot User PATH so we can restore exactly.
 $pathBefore = [Environment]::GetEnvironmentVariable('Path', 'User')
 
