@@ -7,7 +7,9 @@
 #
 # Reads confirmations from /dev/tty so it works even when stdin is a pipe.
 # Set ROCUP_ASSUME_YES=1 to skip the prompts (e.g. in CI) and
-# ROCUP_NO_MODIFY_PATH=1 to leave your shell profile alone.
+# ROCUP_NO_MODIFY_PATH=1 to leave your shell profile alone. ROCUP_VERSION picks
+# what to install (default latest; anything rocup accepts) and ROCUP_SCRIPT
+# copies a local rocup instead of downloading one.
 
 set -eu
 
@@ -18,7 +20,7 @@ RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/rocup"
 ROCUP_HOME="${ROCUP_HOME:-$HOME/.rocup}"
 BIN_DIR="${ROCUP_PREFIX:-$ROCUP_HOME/bin}"
 
-if ! command -v curl >/dev/null 2>&1; then
+if [ -z "${ROCUP_SCRIPT:-}" ] && ! command -v curl >/dev/null 2>&1; then
     echo "error: curl is required" >&2
     exit 1
 fi
@@ -44,7 +46,7 @@ ask() {
 
 cat <<MSG
 This will install rocup:
-  * Download the latest Roc nightly into $ROCUP_HOME
+  * Install Roc (${ROCUP_VERSION:-latest nightly}) into $ROCUP_HOME
   * Link rocup, roc, and roc_language_server in $BIN_DIR
   * Offer to add $BIN_DIR to PATH in your shell profile
 
@@ -52,8 +54,12 @@ MSG
 ask "Proceed? [Y/n]" y || { echo "aborted." >&2; exit 1; }
 
 mkdir -p "$ROCUP_HOME"
-echo ".. downloading rocup from $RAW_URL"
-curl -fsSL "$RAW_URL" -o "$ROCUP_HOME/rocup"
+if [ -n "${ROCUP_SCRIPT:-}" ]; then
+    cp "$ROCUP_SCRIPT" "$ROCUP_HOME/rocup"
+else
+    echo ".. downloading rocup from $RAW_URL"
+    curl -fsSL "$RAW_URL" -o "$ROCUP_HOME/rocup"
+fi
 chmod +x "$ROCUP_HOME/rocup"
 echo ".. installed rocup at $ROCUP_HOME/rocup"
 
@@ -112,7 +118,7 @@ fi
 # Expose the bin dir to this run so rocup itself stays quiet about PATH.
 PATH="$BIN_DIR:$PATH"
 export PATH
-ROCUP_ASSUME_YES=1 ROCUP_HOME="$ROCUP_HOME" ROCUP_PREFIX="$BIN_DIR" "$ROCUP_HOME/rocup" latest
+ROCUP_ASSUME_YES=1 ROCUP_HOME="$ROCUP_HOME" ROCUP_PREFIX="$BIN_DIR" "$ROCUP_HOME/rocup" "${ROCUP_VERSION:-latest}"
 
 echo
 if [ "$restart_note" = 1 ]; then
