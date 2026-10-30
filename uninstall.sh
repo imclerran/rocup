@@ -10,19 +10,22 @@
 set -eu
 
 ROCUP_HOME="${ROCUP_HOME:-$HOME/.rocup}"
-ROCUP_PREFIX="${ROCUP_PREFIX:-/usr/local/bin}"
+BIN_DIR="${ROCUP_PREFIX:-$ROCUP_HOME/bin}"
+# Where installs that predate $ROCUP_HOME/bin put their links.
+LEGACY_BIN="${ROCUP_LEGACY_BIN:-/usr/local/bin}"
 
-cat <<EOF
+cat <<MSG
 This will uninstall rocup:
-  * Remove rocup, roc, and roc_language_server from $ROCUP_PREFIX
-    (only if they point into $ROCUP_HOME; sudo may be required)
   * Delete $ROCUP_HOME (including all installed Roc versions and local-* symlinks;
     'local-*' entries are symlinks, so their source directories are NOT touched)
+  * Remove the PATH line rocup added to your shell profile, if any
+  * Remove rocup, roc, and roc_language_server from $LEGACY_BIN if an older
+    install left them there (only if they point into $ROCUP_HOME; sudo may be required)
 
-EOF
+MSG
 
 if [ ! -d "$ROCUP_HOME" ]; then
-    echo "note: $ROCUP_HOME does not exist; will still clean up any stale $ROCUP_PREFIX symlinks."
+    echo "note: $ROCUP_HOME does not exist; will still clean up any stale links and PATH entries."
     echo
 fi
 
@@ -41,17 +44,15 @@ else
     exit 1
 fi
 
-# 1. Remove a symlink in $ROCUP_PREFIX if it points into $ROCUP_HOME.
-# Conservative: only removes links rocup created. Leaves anything else alone.
-remove_prefix_link() {
+# 1. Remove a link in a bin dir if it points into $ROCUP_HOME.
+# Conservative: only removes entries rocup created. Leaves anything else alone.
+remove_bin_link() {
     link="$1"
     if [ ! -L "$link" ] && [ ! -f "$link" ]; then
         return 0
     fi
-    # If it's a symlink, only remove if it points into $ROCUP_HOME.
-    # If it's a regular file (the roc_language_server shim is a real script,
-    # not a symlink), only remove if it mentions $ROCUP_HOME — meaning rocup
-    # installed it.
+    # Symlinks must point into $ROCUP_HOME. The roc_language_server shim is a
+    # real script, so for a regular file require that it mentions ROCUP_HOME.
     if [ -L "$link" ]; then
         target=$(readlink "$link")
         case "$target" in
@@ -71,11 +72,36 @@ remove_prefix_link() {
     echo ".. removed $link"
 }
 
-remove_prefix_link "$ROCUP_PREFIX/rocup"
-remove_prefix_link "$ROCUP_PREFIX/roc"
-remove_prefix_link "$ROCUP_PREFIX/roc_language_server"
+for dir in "$LEGACY_BIN" "$BIN_DIR"; do
+    case "$dir" in "$ROCUP_HOME"/*) continue ;; esac   # deleted with $ROCUP_HOME below
+    remove_bin_link "$dir/rocup"
+    remove_bin_link "$dir/roc"
+    remove_bin_link "$dir/roc_language_server"
+done
 
-# 2. Delete $ROCUP_HOME.
+# 2. Remove the PATH line install.sh added (plus its '# rocup' marker).
+if [ "$BIN_DIR" = "$HOME/.rocup/bin" ]; then
+    path_dir='$HOME/.rocup/bin'
+else
+    path_dir="$BIN_DIR"
+fi
+remove_path_line() {
+    file="$1"
+    [ -f "$file" ] || return 0
+    grep -Fxq "$2" "$file" || return 0
+    tmp=$(mktemp "${TMPDIR:-/tmp}/rocup-rc.XXXXXX")
+    grep -Fxv -e '# rocup' -e "$2" "$file" > "$tmp" || true
+    cat "$tmp" > "$file"
+    rm -f "$tmp"
+    echo ".. removed PATH entry from $file"
+}
+sh_line="export PATH=\"$path_dir:\$PATH\""
+for f in "$HOME/.bashrc" "$HOME/.bash_profile" "${ZDOTDIR:-$HOME}/.zshrc"; do
+    remove_path_line "$f" "$sh_line"
+done
+remove_path_line "$HOME/.config/fish/config.fish" "set -gx PATH \"$path_dir\" \$PATH"
+
+# 3. Delete $ROCUP_HOME.
 # 'rm -rf' on a directory containing symlinks deletes the symlinks themselves,
 # not their targets (POSIX behavior). So local-* symlinks pointing at user
 # source directories outside $ROCUP_HOME are safe; we only break the link.
