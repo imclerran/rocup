@@ -32,11 +32,16 @@ if [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "$GITHUB_EVENT_PATH" ] && command -v 
     [ -z "$head_repo" ] || repo_slug="$head_repo"
 fi
 
-# Run installer in an isolated dir. ROCUP_PREFIX overrides /usr/local/bin so
-# no sudo is required.
+# A throwaway HOME so the installer's profile edit lands in the sandbox.
+# ROCUP_HOME is set explicitly, so HOME only decides where the profile lives.
+fake_home="$TEST_TMPDIR/home"
+mkdir -p "$fake_home"
+bin="$ROCUP_HOME/bin"
+
 log="$TEST_TMPDIR/install.log"
 rc=0
-ROCUP_REPO="$repo_slug" ROCUP_BRANCH="$branch" ROCUP_ASSUME_YES=1 \
+HOME="$fake_home" SHELL=/bin/zsh ROCUP_NO_MODIFY_PATH= \
+    ROCUP_REPO="$repo_slug" ROCUP_BRANCH="$branch" ROCUP_ASSUME_YES=1 \
     sh "$repo_root/install.sh" > "$log" 2>&1 || rc=$?
 if [ $rc -ne 0 ]; then
     echo "FAIL: install.sh exited $rc. Log:" >&2
@@ -47,16 +52,25 @@ fi
 # Expected post-install state.
 [ -x "$ROCUP_HOME/rocup" ] || { echo "FAIL: rocup script not installed at $ROCUP_HOME/rocup" >&2; exit 1; }
 [ -L "$ROCUP_HOME/roc" ]   || { echo "FAIL: active-version symlink missing" >&2; exit 1; }
-[ -L "$ROCUP_PREFIX/rocup" ] || { echo "FAIL: $ROCUP_PREFIX/rocup symlink missing" >&2; exit 1; }
-[ -L "$ROCUP_PREFIX/roc" ]   || { echo "FAIL: $ROCUP_PREFIX/roc symlink missing" >&2; exit 1; }
+[ -L "$bin/rocup" ] && [ -x "$bin/rocup" ] || { echo "FAIL: $bin/rocup link missing" >&2; exit 1; }
+[ -L "$bin/roc" ] && [ -x "$bin/roc" ]     || { echo "FAIL: $bin/roc link missing" >&2; exit 1; }
 # roc_language_server is installed as a real shim script (not a symlink).
-[ -f "$ROCUP_PREFIX/roc_language_server" ] || { echo "FAIL: roc_language_server shim missing" >&2; exit 1; }
+[ -f "$bin/roc_language_server" ] || { echo "FAIL: roc_language_server shim missing" >&2; exit 1; }
+# Nothing went to the legacy location.
+[ -z "$(ls -A "$ROCUP_LEGACY_BIN")" ] || { echo "FAIL: installer wrote to $ROCUP_LEGACY_BIN" >&2; exit 1; }
+
+# The profile for the selected shell gained the PATH line behind its marker,
+# and the installer did not print the PATH note itself.
+path_line="export PATH=\"$bin:\$PATH\""
+grep -Fxq "$path_line" "$fake_home/.zshrc" || { echo "FAIL: PATH line missing from .zshrc" >&2; cat "$fake_home/.zshrc" >&2; exit 1; }
+grep -Fxq '# rocup' "$fake_home/.zshrc"    || { echo "FAIL: marker missing from .zshrc" >&2; exit 1; }
+! grep -q "is not on your PATH" "$log"      || { echo "FAIL: installer printed the PATH note" >&2; exit 1; }
 
 # Now run uninstall.sh with assume-yes.
 ulog="$TEST_TMPDIR/uninstall.log"
-ROCUP_HOME="$ROCUP_HOME" ROCUP_PREFIX="$ROCUP_PREFIX" ROCUP_ASSUME_YES=1 \
-    sh "$repo_root/uninstall.sh" > "$ulog" 2>&1
-rc=$?
+rc=0
+HOME="$fake_home" ROCUP_HOME="$ROCUP_HOME" ROCUP_ASSUME_YES=1 \
+    sh "$repo_root/uninstall.sh" > "$ulog" 2>&1 || rc=$?
 if [ $rc -ne 0 ]; then
     echo "FAIL: uninstall.sh exited $rc. Log:" >&2
     cat "$ulog" >&2
@@ -65,8 +79,7 @@ fi
 
 # Expected post-uninstall state.
 [ ! -d "$ROCUP_HOME" ] || { echo "FAIL: $ROCUP_HOME still exists after uninstall" >&2; exit 1; }
-[ ! -L "$ROCUP_PREFIX/rocup" ] || { echo "FAIL: $ROCUP_PREFIX/rocup symlink survived" >&2; exit 1; }
-[ ! -L "$ROCUP_PREFIX/roc" ]   || { echo "FAIL: $ROCUP_PREFIX/roc symlink survived" >&2; exit 1; }
-[ ! -f "$ROCUP_PREFIX/roc_language_server" ] || { echo "FAIL: roc_language_server shim survived" >&2; exit 1; }
+! grep -Fq "$bin" "$fake_home/.zshrc"  || { echo "FAIL: PATH line survived uninstall" >&2; exit 1; }
+! grep -Fxq '# rocup' "$fake_home/.zshrc" || { echo "FAIL: marker survived uninstall" >&2; exit 1; }
 
 pass

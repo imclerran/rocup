@@ -223,16 +223,13 @@ cleanup_dangling_global_link() {
         "$ROCUP_HOME"/*) ;;
         *) return 0 ;;
     esac
-    local sudo=sudo
-    if [ -w "$(dirname "$link")" ]; then
-        sudo=""
-    fi
-    $sudo rm -f "$link"
+    rm -f "$link"
     echo ".. cleaned up dangling $link"
 }
 
 cleanup_dangling_global_links() {
-    local prefix="${ROCUP_PREFIX:-/usr/local/bin}"
+    local prefix
+    prefix=$(bin_dir)
     cleanup_dangling_global_link "$prefix/roc"
     cleanup_dangling_global_link "$prefix/roc_language_server"
 }
@@ -1183,12 +1180,8 @@ install_ls_shim() {
     # $1 = prefix dir. Writes a static shim script at $prefix/roc_language_server
     # that, at runtime, either execs the active version's LS binary or prints
     # a helpful error if the active version doesn't ship one. The shim is
-    # installed once (with sudo if needed) and never touched on version switches.
+    # installed once and never touched on version switches.
     local prefix="$1"
-    local sudo=sudo
-    if [ -w "$prefix" ]; then
-        sudo=""
-    fi
     local tmp
     tmp=$(mktemp "${TMPDIR:-/tmp}/rocup-lsshim.XXXXXX")
     cat > "$tmp" <<'EOF'
@@ -1222,54 +1215,108 @@ fi
 exit 127
 EOF
     chmod 755 "$tmp"
-    $sudo mv "$tmp" "$prefix/roc_language_server"
+    mv "$tmp" "$prefix/roc_language_server"
     echo ".. installed roc_language_server shim at $prefix/roc_language_server"
 }
 
-ensure_global_symlinks() {
-    # PREFIX overrides /usr/local/bin (used for testing).
-    local prefix="${ROCUP_PREFIX:-/usr/local/bin}"
-    local script_path
-    script_path=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+# bin_dir
+# Directory holding the rocup/roc/roc_language_server entries. Defaults to
+# $ROCUP_HOME/bin; ROCUP_PREFIX overrides it.
+bin_dir() {
+    echo "${ROCUP_PREFIX:-$ROCUP_HOME/bin}"
+}
 
-    local sudo=sudo
-    if [ -w "$prefix" ]; then
-        sudo=""
-    fi
-
-    if [ -L "$prefix/rocup" ] && [ -L "$prefix/roc" ]; then
-        # User has consented previously. Refresh /usr/local/bin/roc only if
-        # the target has actually changed — a no-op ln -sf would still require
-        # write access to $prefix, prompting sudo on systems where it's root-
-        # owned. The LS shim, once installed, doesn't need touching at all.
-        if [ "$(readlink "$prefix/roc")" != "$ROCUP_HOME/roc/roc" ]; then
-            $sudo ln -sf "$ROCUP_HOME/roc/roc" "$prefix/roc"
+# legacy_links
+# Lists rocup-owned entries left in /usr/local/bin by installs that predate
+# $ROCUP_HOME/bin. ROCUP_LEGACY_BIN overrides the directory (used by tests).
+legacy_links() {
+    local legacy="${ROCUP_LEGACY_BIN:-/usr/local/bin}"
+    [ "$legacy" != "$(bin_dir)" ] || return 0
+    local name path
+    for name in rocup roc roc_language_server; do
+        path="$legacy/$name"
+        if [ -L "$path" ]; then
+            case "$(readlink "$path")" in "$ROCUP_HOME"/*) echo "$path" ;; esac
+        elif [ -f "$path" ] && grep -q ROCUP_HOME "$path" 2>/dev/null; then
+            echo "$path"
         fi
-        # Replace any legacy LS symlink with the shim, or install for the
-        # first time if the file is missing entirely. After this, switching
-        # active versions never touches $prefix/roc_language_server.
-        if [ -L "$prefix/roc_language_server" ] || [ ! -f "$prefix/roc_language_server" ]; then
-            install_ls_shim "$prefix"
-        fi
-        return 0
-    fi
+    done
+}
 
-    echo ".. attempting to create symlinks in $prefix"
+# cleanup_legacy_links
+# Offers once to remove legacy /usr/local/bin entries. Declining writes a
+# marker so later runs stay quiet.
+cleanup_legacy_links() {
+    local marker="$ROCUP_HOME/.keep-legacy-links"
+    [ ! -e "$marker" ] || return 0
+    local links
+    links=$(legacy_links)
+    [ -n "$links" ] || return 0
+    local legacy
+    legacy=$(dirname "${links%%$'\n'*}")
+    echo ".. found rocup entries from an older install in $legacy:"
+    echo "$links" | sed 's/^/     /'
     local reply
     if [ "${ROCUP_ASSUME_YES:-0}" = "1" ]; then
         reply=y
     else
-        read -r -p ".. overwrite rocup, roc, and roc_language_server in $prefix? [y/N] " reply
+        read -r -p ".. remove them? (sudo may be required) [y/N] " reply
     fi
     case "$reply" in
         y|Y|yes|YES|Yes) ;;
-        *) echo ".. skipping global symlinks"; return 0 ;;
+        *)
+            touch "$marker"
+            echo ".. leaving them in place; delete $marker to be asked again"
+            return 0
+            ;;
     esac
+    local sudo=sudo
+    [ ! -w "$legacy" ] || sudo=""
+    local link
+    while IFS= read -r link; do
+        if $sudo rm -f "$link"; then
+            echo ".. removed $link"
+        else
+            echo "warn: could not remove $link" >&2
+        fi
+    done <<< "$links"
+}
 
-    $sudo ln -sf "$script_path" "$prefix/rocup"
-    $sudo ln -sf "$ROCUP_HOME/roc/roc" "$prefix/roc"
-    install_ls_shim "$prefix"
-    echo ".. global symlinks installed in $prefix"
+# ensure_bin_links
+# Points $ROCUP_HOME/bin at this script and the active roc, installs the
+# roc_language_server shim once, and notes when the dir is missing from PATH.
+ensure_bin_links() {
+    local bin
+    bin=$(bin_dir)
+    # Resolve $0 through symlinks so bin/rocup never points at itself.
+    local self="$0" t
+    while [ -L "$self" ]; do
+        t=$(readlink "$self")
+        case "$t" in /*) self="$t" ;; *) self="$(dirname "$self")/$t" ;; esac
+    done
+    local script_path
+    script_path=$(cd "$(dirname "$self")" && pwd)/$(basename "$self")
+
+    mkdir -p "$bin"
+    if [ "$(readlink "$bin/rocup" 2>/dev/null)" != "$script_path" ]; then
+        ln -sf "$script_path" "$bin/rocup"
+    fi
+    if [ "$(readlink "$bin/roc" 2>/dev/null)" != "$ROCUP_HOME/roc/roc" ]; then
+        ln -sf "$ROCUP_HOME/roc/roc" "$bin/roc"
+    fi
+    if [ -L "$bin/roc_language_server" ] || [ ! -f "$bin/roc_language_server" ]; then
+        install_ls_shim "$bin"
+    fi
+
+    cleanup_legacy_links
+
+    case ":$PATH:" in
+        *":$bin:"*) ;;
+        *)
+            echo ".. note: $bin is not on your PATH. Add it with:"
+            echo "     export PATH=\"$bin:\$PATH\""
+            ;;
+    esac
 }
 
 cmd=${1:-latest}
@@ -1282,21 +1329,21 @@ case "$cmd" in
     alpha4|rust)
         platform=$(detect_platform)
         install_alpha4 "$platform"
-        ensure_global_symlinks
+        ensure_bin_links
         ;;
     latest)
         platform=$(detect_platform)
         hash=$(resolve_latest_hash)
         echo ".. latest nightly hash: $hash"
         install_nightly "$hash" "$platform"
-        ensure_global_symlinks
+        ensure_bin_links
         ;;
     list)
         do_list
         ;;
     local)
         activate_local
-        ensure_global_symlinks
+        ensure_bin_links
         ;;
     remove)
         if [ $# -lt 2 ]; then
@@ -1322,12 +1369,12 @@ case "$cmd" in
         fi
         shift
         do_freeze "$@"
-        ensure_global_symlinks
+        ensure_bin_links
         ;;
     *)
         if [[ "$cmd" =~ ^[+-][0-9]+$ ]]; then
             step_nightly "$cmd"
-            ensure_global_symlinks
+            ensure_bin_links
         elif [[ "$cmd" =~ ^[0-9a-f]{7,8}$ ]]; then
             # Hash: try local cache first, otherwise treat as a nightly hash
             # (install_nightly itself short-circuits when already downloaded).
@@ -1337,21 +1384,21 @@ case "$cmd" in
             if [ -e "$ROCUP_HOME/local-$hash" ] || [ -L "$ROCUP_HOME/local-$hash" ]; then
                 echo ".. activating local-$hash"
                 activate "local-$hash"
-                ensure_global_symlinks
+                ensure_bin_links
             else
                 platform=$(detect_platform)
                 install_nightly "$hash" "$platform"
-                ensure_global_symlinks
+                ensure_bin_links
             fi
         elif [[ "$cmd" == frozen-* ]] && [ -d "$ROCUP_HOME/$cmd" ]; then
             activate "$cmd"
-            ensure_global_symlinks
+            ensure_bin_links
         elif [[ "$cmd" =~ ^[a-zA-Z0-9._-]+$ ]] && [ -d "$ROCUP_HOME/frozen-$cmd" ]; then
             activate "frozen-$cmd"
-            ensure_global_symlinks
+            ensure_bin_links
         elif [ -e "$cmd" ]; then
             register_local "$cmd"
-            ensure_global_symlinks
+            ensure_bin_links
         else
             echo "error: invalid argument '$cmd'" >&2
             usage >&2

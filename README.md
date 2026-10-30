@@ -22,7 +22,9 @@ curl -fsSL https://raw.githubusercontent.com/imclerran/rocup/main/install.sh | s
 iwr -useb https://raw.githubusercontent.com/imclerran/rocup/main/install.ps1 | iex
 ```
 
-Both installers prompt for confirmation before downloading anything. Set `ROCUP_ASSUME_YES=1` (or `$env:ROCUP_ASSUME_YES = '1'` on Windows) to skip the prompt in CI. On Windows, restart your terminal afterward so PATH updates take effect.
+Both installers prompt for confirmation before downloading anything. Set `ROCUP_ASSUME_YES=1` (or `$env:ROCUP_ASSUME_YES = '1'` on Windows) to skip the prompts in CI.
+
+Everything lives under `~/.rocup`, and no `sudo` is needed. On macOS/Linux the installer links `rocup`, `roc`, and `roc_language_server` in `~/.rocup/bin` and offers to add that directory to `PATH` in your shell profile (set `ROCUP_NO_MODIFY_PATH=1` to skip, or `ROCUP_PREFIX` to link somewhere else). Restart your terminal afterward so `PATH` updates take effect. If an older rocup linked into `/usr/local/bin`, the next `rocup` run offers to remove those links.
 
 ### **Uninstall**
 
@@ -36,7 +38,7 @@ curl -fsSL https://raw.githubusercontent.com/imclerran/rocup/main/uninstall.sh |
 iwr -useb https://raw.githubusercontent.com/imclerran/rocup/main/uninstall.ps1 | iex
 ```
 
-Uninstalling removes `rocup`'s install root and PATH entries but does not touch the source directories behind any `local-*` registrations.
+Uninstalling removes `rocup`'s install root, its PATH entries, and any links an older install left in `/usr/local/bin`, but does not touch the source directories behind any `local-*` registrations.
 
 ## Usage
 
@@ -100,8 +102,8 @@ After a successful install:
 
 - `~/.rocup/` holds every installed version in its own directory.
 - `~/.rocup/roc` is a symlink to the currently active version.
-- `/usr/local/bin/roc` points at `~/.rocup/roc/roc`.
-- `/usr/local/bin/roc_language_server` is a shim that resolves the LS for whichever `roc` is active (either a bundled `roc_language_server` binary, or `roc experimental-lsp` if the active version supports it).
+- `~/.rocup/bin/rocup` and `~/.rocup/bin/roc` point at the script and `~/.rocup/roc/roc`; `~/.rocup/bin` goes on your `PATH`.
+- `~/.rocup/bin/roc_language_server` is a shim that resolves the LS for whichever `roc` is active (either a bundled `roc_language_server` binary, or `roc experimental-lsp` if the active version supports it).
 
 ## Credits
 

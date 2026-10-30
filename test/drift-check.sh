@@ -9,7 +9,7 @@
 #      using a common vocabulary (REQUIRED_PHRASES). Catches accidental
 #      rewordings where the two scripts drift in described behavior.
 #
-# Implementation-detail differences (symlink vs junction, '/usr/local/bin'
+# Implementation-detail differences (symlink vs junction, shell profile
 # vs User PATH, $ROCUP_HOME vs $env:ROCUP_HOME, file-mode local registration,
 # language server dispatch) are intentionally NOT compared - they're listed
 # in FEATURE_MATRIX.md and are platform-essential.

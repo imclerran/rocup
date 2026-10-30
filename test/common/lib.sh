@@ -12,7 +12,7 @@ setup_test_env() {
     # readlink correctly. No-op on Linux/macOS where the variable is unused.
     # Requires Developer Mode or admin on Windows; otherwise ln still falls back.
     export MSYS=winsymlinks:nativestrict
-    # Tests are non-interactive; auto-confirm prefix symlink writes.
+    # Tests are non-interactive; auto-confirm prompts.
     export ROCUP_ASSUME_YES=1
     # Strip any trailing slash from TMPDIR before composing the mktemp template,
     # otherwise macOS produces paths with a literal '//' segment that won't match
@@ -22,8 +22,10 @@ setup_test_env() {
     TEST_TMPDIR=$(mktemp -d "$_tmpdir/rocup-test.XXXXXX")
     export TEST_TMPDIR
     export ROCUP_HOME="$TEST_TMPDIR/rocup-home"
-    export ROCUP_PREFIX="$TEST_TMPDIR/prefix"
-    mkdir -p "$ROCUP_PREFIX"
+    # Keep tests away from the real shell profile and /usr/local/bin.
+    export ROCUP_NO_MODIFY_PATH=1
+    export ROCUP_LEGACY_BIN="$TEST_TMPDIR/legacy-bin"
+    mkdir -p "$ROCUP_LEGACY_BIN"
     # Path to the rocup script under test. Each test must set ROCUP before
     # sourcing this file, or rely on this default (the repo's rocup at root).
     ROCUP="${ROCUP:-$(cd "$(dirname "$0")/../.." && pwd)/rocup}"
