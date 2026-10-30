@@ -24,6 +24,12 @@ if (-not $nightlyDir) {
     exit 1
 }
 
+# Dir name must carry the release date as YYYY-MM-DD.
+if ($nightlyDir.Name -notmatch '^roc_nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9a-f]{7}$') {
+    [Console]::Error.WriteLine("FAIL: unexpected dir name $($nightlyDir.Name)")
+    exit 1
+}
+
 # roc.exe should be present and executable.
 $rocExe = Join-Path $nightlyDir.FullName 'roc.exe'
 if (-not (Test-Path -LiteralPath $rocExe -PathType Leaf)) {

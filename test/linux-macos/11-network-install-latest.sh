@@ -24,6 +24,10 @@ fi
 nightly_dir=$(find "$ROCUP_HOME" -maxdepth 1 -type d -name 'roc_nightly-*' -print -quit)
 [ -n "$nightly_dir" ] || { echo "FAIL: no roc_nightly-* dir after install" >&2; cat "$log" >&2; exit 1; }
 
+# Dir name must carry the release date as YYYY-MM-DD.
+[[ "$(basename "$nightly_dir")" =~ ^roc_nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9a-f]{7}$ ]] \
+    || { echo "FAIL: unexpected dir name $(basename "$nightly_dir")" >&2; exit 1; }
+
 # The roc binary inside should be executable.
 [ -x "$nightly_dir/roc" ] || { echo "FAIL: $nightly_dir/roc not executable" >&2; exit 1; }
 
