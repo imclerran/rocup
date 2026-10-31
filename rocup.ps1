@@ -308,10 +308,32 @@ function Get-RecentTags {
     # offline / installed-only fallback path. Used by 11-step-offline.ps1.
     if ($env:ROCUP_TEST_OFFLINE -eq '1') { return @() }
 
+    # GitHub orders releases by created_at, which tracks commits in the
+    # nightlies repo rather than the nightly date, so the API order is
+    # unreliable. Always fetch at least a full page, sort by tag date, truncate.
+    $fetchCount = [Math]::Max($Count, 100)
+    $raw = @(Get-UnsortedTags -Repo $Repo -Count $fetchCount)
+    @(Sort-NightlyTags $raw | Select-Object -First $Count)
+}
+
+function Sort-NightlyTags {
+    param([AllowEmptyCollection()][string[]] $Tags)
+    # Newest first by embedded date; hash breaks same-day ties. Tags that
+    # don't parse sort last.
+    $Tags | Where-Object { $_ } | Sort-Object -Descending `
+        @{ Expression = { try { ConvertFrom-NightlyTag $_ } catch { '0000-00-00' } } },
+        @{ Expression = { $_ } }
+}
+
+function Get-UnsortedTags {
+    param(
+        [Parameter(Mandatory)][string] $Repo,
+        [Parameter(Mandatory)][int] $Count
+    )
     # Prefer gh — it authenticates via GH_TOKEN/keyring, avoiding the 60-req/hr
     # unauthenticated REST rate limit that bites CI runs from shared IPs.
     # Falls through to Invoke-RestMethod when gh is absent, unauthenticated, or
-    # returns no rows. Mirrors fetch_recent_tags() in the bash port.
+    # returns no rows. Mirrors fetch_tags_unsorted() in the bash port.
     if (Get-Command gh -ErrorAction SilentlyContinue) {
         $r = Invoke-GhSafely @('release', 'list', '--repo', $Repo,
             '--limit', "$Count", '--json', 'tagName', '--jq', '.[].tagName')

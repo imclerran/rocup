@@ -601,9 +601,10 @@ local_mdy() {
 }
 
 # fetch_recent_tags <repo> <count>
-# Echoes tag names newline-separated, most recent first. Tries gh first,
-# falls back to the public GitHub REST API via curl (no auth required for
-# public repos) when gh is missing, unauthenticated, or returns no rows.
+# Echoes tag names newline-separated, newest first by the date embedded in the
+# tag. GitHub orders releases by created_at, which tracks commits in the
+# nightlies repo rather than the nightly date, so the API order is unreliable.
+# We always fetch at least a full page, sort by tag date, then truncate.
 fetch_recent_tags() {
     local repo="$1" count="$2"
     # Test hook: force the empty-tags response so callers exercise the offline /
@@ -611,6 +612,33 @@ fetch_recent_tags() {
     if [ "${ROCUP_TEST_OFFLINE:-0}" = "1" ]; then
         return 0
     fi
+    local fetch_count=$count
+    [ "$fetch_count" -lt 100 ] && fetch_count=100
+    local raw
+    if ! raw=$(fetch_tags_unsorted "$repo" "$fetch_count"); then
+        return 1
+    fi
+    sort_tags_by_date "$raw" | head -n "$count"
+}
+
+# sort_tags_by_date <tags-newline-separated>
+# Echoes the tags newest first by embedded date (hash breaks same-day ties).
+# Tags that don't parse sort last.
+sort_tags_by_date() {
+    local tag key
+    while IFS= read -r tag; do
+        [ -n "$tag" ] || continue
+        key=$(parse_tag_date "$tag" 2>/dev/null) || key="0000-00-00"
+        printf '%s %s\n' "$key" "$tag"
+    done <<< "$1" | LC_ALL=C sort -r | cut -d' ' -f2-
+}
+
+# fetch_tags_unsorted <repo> <count>
+# Echoes tag names in GitHub's own order. Tries gh first, falls back to the
+# public GitHub REST API via curl (no auth required for public repos) when gh
+# is missing, unauthenticated, or returns no rows.
+fetch_tags_unsorted() {
+    local repo="$1" count="$2"
     if command -v gh >/dev/null 2>&1; then
         local out
         if out=$(gh release list --repo "$repo" --limit "$count" \
