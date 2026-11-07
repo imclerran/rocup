@@ -38,7 +38,7 @@ done
 flatten() { tr -d '\r' | tr '\n' ' ' | tr -s ' '; }
 flat=$(COLUMNS=60 "$ROCUP" --help 2>&1 | flatten)
 for phrase in \
-    "<hash> | <path> | local | +N | -N | list" \
+    "<hash>[-safe] | <path> | local | +N | -N | list" \
     "install/activate the most recent nightly" \
     "roc-lang/nightlies" \
     "default if no arg" \

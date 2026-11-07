@@ -93,6 +93,7 @@ function Convert-MonthNameToNumber {
 function ConvertFrom-NightlyTag {
     param([Parameter(Mandatory)][string] $Tag)
     # Tag format: nightly-YYYY-MM-DD-<hash>. Older tags used a month name.
+    # A trailing variant suffix (...-<hash>-safe) is tolerated.
     $parts = $Tag -split '-'
     if ($parts.Count -lt 5 -or $parts[0] -ne 'nightly') {
         throw "error: unexpected nightly tag format: $Tag"
@@ -107,7 +108,7 @@ function ConvertFrom-NightlyTag {
 function Get-DirSortKey {
     param([Parameter(Mandatory)][string] $Dir)
     $name = Split-Path -Leaf $Dir
-    if ($name -match '^roc_nightly-([0-9]{4})-([0-9]{2})-([0-9]{2})-[0-9a-f]{7}$') {
+    if ($name -match '^roc_nightly-([0-9]{4})-([0-9]{2})-([0-9]{2})-[0-9a-f]{7}(-safe)?$') {
         return "$($Matches[1])-$($Matches[2])-$($Matches[3])"
     }
     # Prefer the roc.exe binary's mtime: a dir's mtime only changes when
@@ -133,13 +134,40 @@ function Get-Sha256Hex {
     finally { $sha.Dispose() }
 }
 
+# Nightly variants. The nightlies repo publishes the regular build under
+# nightly-YYYY-MM-DD-<hash> and, for recent nightlies, a ReleaseSafe build of
+# the same commit under nightly-YYYY-MM-DD-<hash>-safe. rocup carries the
+# variant as '' (regular) or 'safe', appends the same suffix to the on-disk
+# dir name (roc_nightly-YYYY-MM-DD-<hash>-safe), and addresses it on the
+# command line as <hash>-safe / latest-safe. Mirrors the bash port.
+
+function Get-VariantSuffix {
+    param([string] $Variant = '')
+    if ($Variant) { "-$Variant" } else { '' }
+}
+
+function Get-VariantLabel {
+    param([string] $Variant = '')
+    if ($Variant) { 'safe nightlies' } else { 'nightlies' }
+}
+
+function Get-TagHash {
+    # The 7-char commit hash from a nightly tag (or dir name) of either variant.
+    param([Parameter(Mandatory)][string] $Tag)
+    $t = $Tag
+    if ($t.EndsWith('-safe')) { $t = $t.Substring(0, $t.Length - 5) }
+    $t.Split('-')[-1]
+}
+
 function Find-NightlyDir {
-    param([Parameter(Mandatory)][string] $Hash)
+    param([Parameter(Mandatory)][string] $Hash, [string] $Variant = '')
     if (-not (Test-Path -LiteralPath $script:RocupHome -PathType Container)) { return '' }
-    # Prefer new-format: roc_nightly-YYYY-MM-DD-<hash>
-    $found = Get-ChildItem -LiteralPath $script:RocupHome -Directory -Filter "roc_nightly-*-$Hash" -ErrorAction SilentlyContinue |
+    $suffix = Get-VariantSuffix $Variant
+    # Prefer new-format: roc_nightly-YYYY-MM-DD-<hash>[-safe]
+    $found = Get-ChildItem -LiteralPath $script:RocupHome -Directory -Filter "roc_nightly-*-$Hash$suffix" -ErrorAction SilentlyContinue |
              Select-Object -First 1
     if ($found) { return $found.Name }
+    if ($Variant) { return '' }
     # Legacy: roc_nightly-<hash>
     $legacy = Join-Path $script:RocupHome "roc_nightly-$Hash"
     if (Test-Path -LiteralPath $legacy) { return "roc_nightly-$Hash" }
@@ -302,7 +330,8 @@ function Invoke-GhSafely {
 function Get-RecentTags {
     param(
         [Parameter(Mandatory)][string] $Repo,
-        [Parameter(Mandatory)][int] $Count
+        [Parameter(Mandatory)][int] $Count,
+        [string] $Variant = ''
     )
     # Test hook: force the empty-tags response so callers exercise the
     # offline / installed-only fallback path. Used by 11-step-offline.ps1.
@@ -313,7 +342,18 @@ function Get-RecentTags {
     # unreliable. Always fetch at least a full page, sort by tag date, truncate.
     $fetchCount = [Math]::Max($Count, 100)
     $raw = @(Get-UnsortedTags -Repo $Repo -Count $fetchCount)
-    @(Sort-NightlyTags $raw | Select-Object -First $Count)
+    @(Sort-NightlyTags (Select-NightlyTags -Tags $raw -Variant $Variant) | Select-Object -First $Count)
+}
+
+function Select-NightlyTags {
+    param([AllowEmptyCollection()][string[]] $Tags, [string] $Variant = '')
+    # Keep only the tags of one variant: those ending in the 7-char commit
+    # hash for the regular build, or in <hash>-safe for the safe build. Each
+    # variant has its own release timeline; anything else (junk, unknown
+    # suffixes) is dropped so it can't become "latest" or shift +N/-N
+    # offsets. Mirrors select_nightly_tags() in the bash port.
+    $suffix = Get-VariantSuffix $Variant
+    @($Tags | Where-Object { $_ -match "-[0-9a-f]{7}$suffix`$" })
 }
 
 function Sort-NightlyTags {
@@ -365,12 +405,13 @@ function Get-UnsortedTags {
 }
 
 function Resolve-LatestHash {
-    $tags = @(Get-RecentTags -Repo 'roc-lang/nightlies' -Count 1)
+    param([string] $Variant = '')
+    $tags = @(Get-RecentTags -Repo 'roc-lang/nightlies' -Count 1 -Variant $Variant)
     if (-not $tags -or $tags.Count -eq 0) {
-        throw "error: could not find any nightly releases in roc-lang/nightlies"
+        throw "error: could not find any $(Get-VariantLabel $Variant) in roc-lang/nightlies"
     }
     $tag = $tags[0]
-    $hash = $tag.Split('-')[-1]
+    $hash = Get-TagHash $tag
     if ($hash -notmatch '^[0-9a-f]{7}$') {
         throw "error: latest release tag '$tag' did not end in a 7-char hash"
     }
@@ -382,11 +423,13 @@ function Get-NightlyAsset {
         [Parameter(Mandatory)][string] $Tag,
         [Parameter(Mandatory)][string] $Platform,
         [Parameter(Mandatory)][string] $Hash,
-        [Parameter(Mandatory)][string] $DestDir
+        [Parameter(Mandatory)][string] $DestDir,
+        [string] $Variant = ''
     )
+    $suffix = Get-VariantSuffix $Variant
     $dateYmd = ConvertFrom-NightlyTag $Tag
-    $tHash = $Tag.Split('-')[-1]
-    $asset = "roc_nightly-$Platform-$dateYmd-$tHash.zip"
+    $tHash = Get-TagHash $Tag
+    $asset = "roc_nightly-$Platform-$dateYmd-$tHash$suffix.zip"
     $out = Join-Path $DestDir $asset
 
     # Prefer gh release download — keeps the auth boundary consistent with
@@ -395,7 +438,7 @@ function Get-NightlyAsset {
     # the fallback still works without credentials. Mirrors
     # download_nightly_asset() in the bash port.
     if (Get-Command gh -ErrorAction SilentlyContinue) {
-        $pattern = "roc_nightly-$Platform-*-$Hash.zip"
+        $pattern = "roc_nightly-$Platform-*-$Hash$suffix.zip"
         $r = Invoke-GhSafely @('release', 'download', $Tag,
             '--repo', 'roc-lang/nightlies',
             '--pattern', $pattern, '--dir', $DestDir)
@@ -459,38 +502,43 @@ function Expand-RocArchive {
 function Install-Nightly {
     param(
         [Parameter(Mandatory)][string] $Hash,
-        [Parameter(Mandatory)][string] $Platform
+        [Parameter(Mandatory)][string] $Platform,
+        [string] $Variant = ''
     )
+    $suffix = Get-VariantSuffix $Variant
     New-Item -ItemType Directory -Path $script:RocupHome -Force | Out-Null
 
     # Short-circuit if already installed.
-    $existing = Find-NightlyDir $Hash
+    $existing = Find-NightlyDir -Hash $Hash -Variant $Variant
     if ($existing) {
         $existingExe = Join-Path (Join-Path $script:RocupHome $existing) 'roc.exe'
         if (Test-Path -LiteralPath $existingExe) {
-            Write-Host ".. nightly $Hash already extracted at $script:RocupHome\$existing; skipping download"
+            Write-Host ".. nightly $Hash$suffix already extracted at $script:RocupHome\$existing; skipping download"
             Set-ActiveVersion $existing
             return
         }
     }
 
-    Write-Host ".. looking up nightly release with hash $Hash"
-    $tags = Get-RecentTags -Repo 'roc-lang/nightlies' -Count 200
-    $tag = $tags | Where-Object { $_.EndsWith("-$Hash") } | Select-Object -First 1
+    Write-Host ".. looking up nightly release with hash $Hash$suffix"
+    $tags = Get-RecentTags -Repo 'roc-lang/nightlies' -Count 200 -Variant $Variant
+    $tag = $tags | Where-Object { $_.EndsWith("-$Hash$suffix") } | Select-Object -First 1
     if (-not $tag) {
+        if ($Variant) {
+            throw "error: no safe build of nightly '$Hash' found in roc-lang/nightlies (safe builds exist only for recent nightlies; 'rocup $Hash' installs the regular build)"
+        }
         throw "error: no nightly release with hash '$Hash' found in roc-lang/nightlies"
     }
     Write-Host ".. found release: $tag"
 
     $dateYmd = ConvertFrom-NightlyTag $tag
-    $dirName = "roc_nightly-$dateYmd-$Hash"
+    $dirName = "roc_nightly-$dateYmd-$Hash$suffix"
     $targetDir = Join-Path $script:RocupHome $dirName
 
     $downloadDir = Join-Path ([IO.Path]::GetTempPath()) ("rocup-nightly-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
     try {
         Write-Host ".. downloading nightly asset for $Platform"
-        $zip = Get-NightlyAsset -Tag $tag -Platform $Platform -Hash $Hash -DestDir $downloadDir
+        $zip = Get-NightlyAsset -Tag $tag -Platform $Platform -Hash $Hash -DestDir $downloadDir -Variant $Variant
 
         Write-Host ".. extracting"
         try {
@@ -513,10 +561,21 @@ function Install-Nightly {
 # --- Top-level command handlers ------------------------------------------
 
 function Invoke-Latest {
+    param([string] $Variant = '')
     $platform = Get-Platform
-    $hash = Resolve-LatestHash
-    Write-Host ".. latest nightly hash: $hash"
-    Install-Nightly -Hash $hash -Platform $platform
+    $hash = Resolve-LatestHash -Variant $Variant
+    if ($Variant) { Write-Host ".. latest safe nightly hash: $hash" }
+    else          { Write-Host ".. latest nightly hash: $hash" }
+    Install-Nightly -Hash $hash -Platform $platform -Variant $Variant
+    Initialize-RocupShims
+}
+
+function Invoke-SafeHashDispatch {
+    # Safe build of a nightly. Locals are never safe variants, so there is no
+    # local-<hash> lookup here.
+    param([Parameter(Mandatory)][string] $RawHash)
+    $platform = Get-Platform
+    Install-Nightly -Hash $RawHash.Substring(0, 7) -Platform $platform -Variant 'safe'
     Initialize-RocupShims
 }
 
@@ -565,6 +624,13 @@ function Remove-Version {
     switch -Regex ($Ver) {
         '^local-[0-9a-f]{7}$' { $dirName = $Ver; break }
         '^frozen-[a-zA-Z0-9._-]+$' { $dirName = $Ver; break }
+        '^[0-9a-f]{7,8}-safe$' {
+            $hash = $Ver.Substring(0, 7)
+            $found = Find-NightlyDir -Hash $hash -Variant 'safe'
+            if ($found) { $dirName = $found }
+            else        { $dirName = "roc_nightly-$hash-safe" }
+            break
+        }
         '^[0-9a-f]{7,8}$' {
             $hash = $Ver.Substring(0, 7)
             $localDir = Join-Path $script:RocupHome "local-$hash"
@@ -582,12 +648,12 @@ function Remove-Version {
             if (Test-Path -LiteralPath $candidate) {
                 $dirName = "frozen-$Ver"
             } else {
-                throw "error: invalid version '$Ver' (expected 7- or 8-char hash, 'local-<hash>', 'frozen-<name>', or a frozen name)"
+                throw "error: invalid version '$Ver' (expected 7- or 8-char hash, '<hash>-safe', 'local-<hash>', 'frozen-<name>', or a frozen name)"
             }
             break
         }
         default {
-            throw "error: invalid version '$Ver' (expected 7- or 8-char hash, 'local-<hash>', 'frozen-<name>', or a frozen name)"
+            throw "error: invalid version '$Ver' (expected 7- or 8-char hash, '<hash>-safe', 'local-<hash>', 'frozen-<name>', or a frozen name)"
         }
     }
 
@@ -699,24 +765,29 @@ function Step-Nightly {
         throw "error: +N/-N requires an active nightly; $active is active."
     }
 
-    $activeHash = $active.Split('-')[-1]
+    # Stepping stays within the active build's variant: from a safe build,
+    # only safe builds are considered, and running off the end of that
+    # (shorter) timeline is an error rather than a silent switch to the
+    # regular build.
+    $variant = if ($active.EndsWith('-safe')) { 'safe' } else { '' }
+    $activeHash = Get-TagHash $active
     if ($activeHash -notmatch '^[0-9a-f]{7}$') {
         throw "error: could not parse active nightly hash from '$active'"
     }
 
-    Write-Host ".. stepping $Raw from $activeHash"
+    Write-Host ".. stepping $Raw from $activeHash$(Get-VariantSuffix $variant)"
 
     try {
-        $tags = @(Get-RecentTags -Repo 'roc-lang/nightlies' -Count 200)
+        $tags = @(Get-RecentTags -Repo 'roc-lang/nightlies' -Count 200 -Variant $variant)
         if ($tags.Count -gt 0) {
-            Step-NightlyViaTags -Sign $sign -N $n -ActiveHash $activeHash -Tags $tags
+            Step-NightlyViaTags -Sign $sign -N $n -ActiveHash $activeHash -Tags $tags -Variant $variant
             return
         }
     } catch {
         Write-Host ".. network unavailable; using installed nightlies only"
     }
 
-    Step-NightlyViaInstalled -Sign $sign -N $n -Active $active
+    Step-NightlyViaInstalled -Sign $sign -N $n -Active $active -Variant $variant
 }
 
 function Step-NightlyViaTags {
@@ -724,46 +795,58 @@ function Step-NightlyViaTags {
         [Parameter(Mandatory)][string] $Sign,
         [Parameter(Mandatory)][int] $N,
         [Parameter(Mandatory)][string] $ActiveHash,
-        [Parameter(Mandatory)][string[]] $Tags
+        [Parameter(Mandatory)][string[]] $Tags,
+        [string] $Variant = ''
     )
+    $suffix = Get-VariantSuffix $Variant
+    $label = Get-VariantLabel $Variant
     $i = -1
     for ($idx = 0; $idx -lt $Tags.Count; $idx++) {
-        if ($Tags[$idx].EndsWith("-$ActiveHash")) { $i = $idx; break }
+        if ($Tags[$idx].EndsWith("-$ActiveHash$suffix")) { $i = $idx; break }
     }
     if ($i -lt 0) {
-        throw "error: active nightly $ActiveHash is older than the most recent 200 releases; relative navigation is not supported from here. Use 'rocup latest' or a specific hash."
+        throw "error: active nightly $ActiveHash$suffix is older than the most recent 200 $label; relative navigation is not supported from here. Use 'rocup latest' or a specific hash."
     }
+
+    # Safe builds exist only for recent nightlies, so the safe timeline runs
+    # out sooner than the regular one. Point at the exit rather than crossing
+    # over silently.
+    $hint = if ($Variant) { " Use 'rocup $ActiveHash' to switch to the regular build of this nightly." } else { '' }
 
     if ($Sign -eq '+') {
         $targetIdx = $i - $N
-        if ($targetIdx -lt 0) { throw "error: only $i nightlies newer than active; cannot step +$N." }
+        if ($targetIdx -lt 0) { throw "error: only $i $label newer than active; cannot step +$N.$hint" }
     } else {
         $targetIdx = $i + $N
         if ($targetIdx -ge $Tags.Count) {
             $available = $Tags.Count - $i - 1
-            throw "error: only $available nightlies older than active in the most recent 200; cannot step -$N."
+            throw "error: only $available $label older than active in the most recent 200; cannot step -$N.$hint"
         }
     }
 
     $targetTag = $Tags[$targetIdx]
     Write-Host ".. target: $targetTag"
-    $targetHash = $targetTag.Split('-')[-1]
+    $targetHash = Get-TagHash $targetTag
     $platform = Get-Platform
-    Install-Nightly -Hash $targetHash -Platform $platform
+    Install-Nightly -Hash $targetHash -Platform $platform -Variant $Variant
 }
 
 function Step-NightlyViaInstalled {
     param(
         [Parameter(Mandatory)][string] $Sign,
         [Parameter(Mandatory)][int] $N,
-        [Parameter(Mandatory)][string] $Active
+        [Parameter(Mandatory)][string] $Active,
+        [string] $Variant = ''
     )
+    $label = "installed $(Get-VariantLabel $Variant)"
     if (-not (Test-Path -LiteralPath $script:RocupHome -PathType Container)) {
-        throw "error: no installed nightlies (offline; only installed nightlies considered)"
+        throw "error: no $label (offline; only installed nightlies considered)"
     }
-    $nightlies = @(Get-InstalledVersionDirs | Where-Object { $_.Name -like 'roc_nightly-*' })
+    $nightlies = @(Get-InstalledVersionDirs | Where-Object {
+        $_.Name -like 'roc_nightly-*' -and (($_.Name -like '*-safe') -eq [bool] $Variant)
+    })
     if ($nightlies.Count -eq 0) {
-        throw "error: no installed nightlies (offline; only installed nightlies considered)"
+        throw "error: no $label (offline; only installed nightlies considered)"
     }
     $sorted = $nightlies | Sort-Object { Get-DirSortKey $_.FullName } -Descending
     $names = @($sorted | ForEach-Object { $_.Name })
@@ -778,12 +861,12 @@ function Step-NightlyViaInstalled {
 
     if ($Sign -eq '+') {
         $targetIdx = $i - $N
-        if ($targetIdx -lt 0) { throw "error: only $i installed nightlies newer than active; cannot step +$N (offline; only installed nightlies considered)." }
+        if ($targetIdx -lt 0) { throw "error: only $i $label newer than active; cannot step +$N (offline; only installed nightlies considered)." }
     } else {
         $targetIdx = $i + $N
         if ($targetIdx -ge $names.Count) {
             $available = $names.Count - $i - 1
-            throw "error: only $available installed nightlies older than active; cannot step -$N (offline; only installed nightlies considered)."
+            throw "error: only $available $label older than active; cannot step -$N (offline; only installed nightlies considered)."
         }
     }
 
@@ -840,6 +923,9 @@ function Test-FreezeName {
         if ($nightly) {
             throw "freeze: name '$Name' conflicts with an existing version hash; choose another name"
         }
+    }
+    if ($Name -match '^([0-9a-f]{7})-safe$' -and (Find-NightlyDir -Hash $Matches[1] -Variant 'safe')) {
+        throw "freeze: name '$Name' conflicts with an existing version hash; choose another name"
     }
     $Name
 }
@@ -984,7 +1070,7 @@ function Invoke-List {
                 Write-Host ("{0}{1,-7} (legacy)" -f $marker, 'alpha4')
                 break
             }
-            '^roc_nightly-([0-9]{4})-([0-9]{2})-([0-9]{2})-([0-9a-f]{7})$' {
+            '^roc_nightly-([0-9]{4})-([0-9]{2})-([0-9]{2})-([0-9a-f]{7}(-safe)?)$' {
                 $mdy = '{0}/{1}/{2}' -f $Matches[2], $Matches[3], $Matches[1]
                 Write-Host ("{0}{1,-7} ({2}) <{3}>" -f $marker, 'nightly', $mdy, $Matches[4])
                 break
@@ -1087,13 +1173,15 @@ function Show-Usage {
     $cmds = @(
         @{ Label = 'latest';       Desc = "install/activate the most recent nightly from roc-lang/nightlies (default if no arg)" }
         @{ Label = '<hash>';       Desc = "7- or 8-char hex (8-char matches 'roc --version' output, which is then truncated to 7 to look up GitHub releases). If a local install with that hash is registered, activate it. Else if the nightly is already downloaded, activate it. Else fetch the nightly from roc-lang/nightlies and install." }
+        @{ Label = 'latest-safe';  Desc = "like 'latest', but install/activate the safe build of the most recent nightly that has one. Safe builds are the same compiler built with Zig's ReleaseSafe mode: runtime safety checks stay on, so a compiler bug panics instead of corrupting memory. Slower than the regular build." }
+        @{ Label = '<hash>-safe';  Desc = "like '<hash>', but install/activate the safe build of that nightly. Safe and regular builds of the same nightly are installed side by side and switched between without re-downloading." }
         @{ Label = '<path>';       Desc = "register a local roc as 'local-<hash>' inside `$env:ROCUP_HOME (via junction, not copy). Path must be a directory containing roc.exe. File paths are not supported on Windows." }
         @{ Label = 'local';        Desc = "activate a registered local roc build. With one local registered, activate it; with several, activate the most recently built one (newest roc.exe mtime). Errors if no locals are registered." }
-        @{ Label = '+N | -N';      Desc = "step N nightlies newer (+) or older (-) than the active one. Requires the active version to be a nightly." }
+        @{ Label = '+N | -N';      Desc = "step N nightlies newer (+) or older (-) than the active one. Requires the active version to be a nightly. From a safe build, steps among safe builds only." }
         @{ Label = 'list';         Desc = "show installed versions and mark the active one." }
         @{ Label = 'freeze <name>'; Desc = "snapshot the active local build into `$env:ROCUP_HOME\frozen-<name>\ as real files (not junctions). Requires an active local. <name> matches [a-zA-Z0-9._-] and must not collide with an existing hash. Pass --force to overwrite an existing frozen entry. The original local-<hash> registration is left intact; active becomes frozen-<name>." }
-        @{ Label = 'remove <ver>'; Desc = "delete a version (7- or 8-char hash, local-<hash>, frozen-<name>, or a bare frozen name)." }
-        @{ Label = 'prune <N>';    Desc = "keep the N most recent nightlies; delete older ones." }
+        @{ Label = 'remove <ver>'; Desc = "delete a version (7- or 8-char hash, <hash>-safe, local-<hash>, frozen-<name>, or a bare frozen name)." }
+        @{ Label = 'prune <N>';    Desc = "keep the N most recent nightlies; delete older ones. Safe builds count as nightlies." }
     )
 
     $out = [System.Collections.Generic.List[string]]::new()
@@ -1101,7 +1189,7 @@ function Show-Usage {
     # Synopsis line. 14-space hanging indent so continuation lines align
     # under '[latest'.
     $out.Add( (Format-Wrapped -Width $width -FirstPrefix '' -ContPrefix (' ' * 14) `
-        -Text 'usage: rocup [latest | <hash> | <path> | local | +N | -N | list | freeze <name> | remove <ver> | prune <N>]') )
+        -Text 'usage: rocup [latest[-safe] | <hash>[-safe] | <path> | local | +N | -N | list | freeze <name> | remove <ver> | prune <N>]') )
     $out.Add('')
 
     foreach ($c in $cmds) {
@@ -1131,7 +1219,7 @@ function Invoke-Rocup {
         '^local$'            { Invoke-Local; Initialize-RocupShims; return }
         '^remove$' {
             if ($argv.Count -lt 2) {
-                throw "error: 'remove' requires an argument (7- or 8-char hash, or local-<hash>)"
+                throw "error: 'remove' requires an argument (7- or 8-char hash, <hash>-safe, or local-<hash>)"
             }
             Remove-Version $argv[1]
             return
@@ -1144,6 +1232,7 @@ function Invoke-Rocup {
             return
         }
         '^latest$'           { Invoke-Latest; return }
+        '^latest-safe$'      { Invoke-Latest -Variant 'safe'; return }
         '^freeze$' {
             if ($argv.Count -lt 2) {
                 throw "error: 'freeze' requires a name (e.g. 'rocup freeze myfeature')"
@@ -1154,6 +1243,7 @@ function Invoke-Rocup {
         }
         '^[+-][0-9]+$'       { Step-Nightly $cmd; Initialize-RocupShims; return }
         '^[0-9a-f]{7,8}$'    { Invoke-HashDispatch $cmd; return }
+        '^[0-9a-f]{7,8}-safe$' { Invoke-SafeHashDispatch $cmd; return }
         '^frozen-[a-zA-Z0-9._-]+$' {
             $candidate = Join-Path $script:RocupHome $cmd
             if (Test-Path -LiteralPath $candidate -PathType Container) {

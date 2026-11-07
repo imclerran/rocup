@@ -56,7 +56,7 @@ usage() {
     # Synopsis line. Wraps with a 14-space hanging indent so continuation
     # lines align under '[alpha4'.
     wrap_text "$width" "" "              " \
-        "usage: rocup [alpha4 | latest | <hash> | <path> | local | +N | -N | list | freeze <name> | remove <ver> | prune <N>]"
+        "usage: rocup [alpha4 | latest[-safe] | <hash>[-safe] | <path> | local | +N | -N | list | freeze <name> | remove <ver> | prune <N>]"
     echo
 
     # Each command is rendered as: 2-space indent, label padded to 16 cols,
@@ -81,6 +81,16 @@ usage() {
         "7- or 8-char hex (8-char matches 'roc --version' output, which is then truncated to 7 to look up GitHub releases). If a local install with that hash is registered, activate it. Else if the nightly is already downloaded, activate it. Else fetch the nightly from roc-lang/nightlies and install."
     echo
 
+    first=$(printf "  %-16s" "latest-safe")
+    wrap_text "$width" "$first" "$cont" \
+        "like 'latest', but install/activate the safe build of the most recent nightly that has one. Safe builds are the same compiler built with Zig's ReleaseSafe mode: runtime safety checks stay on, so a compiler bug panics instead of corrupting memory. Slower than the regular build."
+    echo
+
+    first=$(printf "  %-16s" "<hash>-safe")
+    wrap_text "$width" "$first" "$cont" \
+        "like '<hash>', but install/activate the safe build of that nightly. Safe and regular builds of the same nightly are installed side by side and switched between without re-downloading."
+    echo
+
     first=$(printf "  %-16s" "<path>")
     wrap_text "$width" "$first" "$cont" \
         "register a local roc as 'local-<hash>' inside \$ROCUP_HOME (via symlink, not copy) and activate it. Directory: requires 'roc', optionally picks up 'roc_language_server'. File: links just roc."
@@ -93,7 +103,7 @@ usage() {
 
     first=$(printf "  %-16s" "+N | -N")
     wrap_text "$width" "$first" "$cont" \
-        "step N nightlies newer (+) or older (-) than the active one, resolving against the GitHub release timeline (or, if offline, among installed nightlies only). Requires the active version to be a nightly. Example: 'rocup -2' activates two releases older than current; 'rocup +1' activates the next-newer one."
+        "step N nightlies newer (+) or older (-) than the active one, resolving against the GitHub release timeline (or, if offline, among installed nightlies only). Requires the active version to be a nightly. From a safe build, steps among safe builds only. Example: 'rocup -2' activates two releases older than current; 'rocup +1' activates the next-newer one."
     echo
 
     first=$(printf "  %-16s" "list")
@@ -108,12 +118,12 @@ usage() {
 
     first=$(printf "  %-16s" "remove <ver>")
     wrap_text "$width" "$first" "$cont" \
-        "delete a version (alpha4, 7- or 8-char hash, local-<hash>, frozen-<name>, or a bare frozen name). A bare hash resolves to a registered local first, otherwise a nightly. If the removed version was active, the most recent remaining one becomes active. Removing a local only drops the registration; the actual local files are untouched."
+        "delete a version (alpha4, 7- or 8-char hash, <hash>-safe, local-<hash>, frozen-<name>, or a bare frozen name). A bare hash resolves to a registered local first, otherwise a nightly. If the removed version was active, the most recent remaining one becomes active. Removing a local only drops the registration; the actual local files are untouched."
     echo
 
     first=$(printf "  %-16s" "prune <N>")
     wrap_text "$width" "$first" "$cont" \
-        "keep the N most recent nightlies; delete older ones. The active nightly is always kept (counts toward N if it's already in the top N). alpha4 and locals are exempt."
+        "keep the N most recent nightlies; delete older ones. Safe builds count as nightlies. The active nightly is always kept (counts toward N if it's already in the top N). alpha4 and locals are exempt."
 }
 
 detect_platform() {
@@ -179,7 +189,7 @@ do_list() {
                 printf "%s%-7s (legacy)\n" "$marker" "alpha4"
                 ;;
             roc_nightly-*)
-                if [[ "$name" =~ ^roc_nightly-([0-9]{4})-([0-9]{2})-([0-9]{2})-([0-9a-f]{7})$ ]]; then
+                if [[ "$name" =~ ^roc_nightly-([0-9]{4})-([0-9]{2})-([0-9]{2})-([0-9a-f]{7}(-safe)?)$ ]]; then
                     printf "%s%-7s (%s/%s/%s) <%s>\n" "$marker" "nightly" \
                         "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[1]}" "${BASH_REMATCH[4]}"
                 else
@@ -235,7 +245,7 @@ cleanup_dangling_global_links() {
 }
 
 remove_version() {
-    # $1 = "alpha4", 7-char hash, or "local-<7-char-hash>"
+    # $1 = "alpha4", 7-char hash, "<hash>-safe", or "local-<7-char-hash>"
     # For a bare 7-char hash, prefer a registered local-<hash>; otherwise treat
     # as a nightly hash. Matches the dispatch order used by `rocup <hash>`.
     local ver="$1"
@@ -243,6 +253,16 @@ remove_version() {
     case "$ver" in
         alpha4)
             dir_name="roc-alpha4-rolling"
+            ;;
+        *-safe)
+            local hash="${ver%-safe}"
+            if [[ ! "$hash" =~ ^[0-9a-f]{7,8}$ ]]; then
+                echo "error: invalid version '$ver' (expected '<7- or 8-char hash>-safe')" >&2
+                exit 1
+            fi
+            hash="${hash:0:7}"
+            dir_name=$(find_nightly_dir "$hash" safe)
+            [ -n "$dir_name" ] || dir_name="roc_nightly-$hash-safe"
             ;;
         local-*)
             if [[ ! "${ver#local-}" =~ ^[0-9a-f]{7}$ ]]; then
@@ -278,7 +298,7 @@ remove_version() {
             elif [ -d "$ROCUP_HOME/frozen-$ver" ]; then
                 dir_name="frozen-$ver"
             else
-                echo "error: invalid version '$ver' (expected 'alpha4', 7- or 8-char hash, 'local-<hash>', 'frozen-<name>', or a frozen name)" >&2
+                echo "error: invalid version '$ver' (expected 'alpha4', 7- or 8-char hash, '<hash>-safe', 'local-<hash>', 'frozen-<name>', or a frozen name)" >&2
                 exit 1
             fi
             ;;
@@ -510,6 +530,7 @@ month_name_to_num() {
 # parse_tag_date <tag>
 # Tag format: nightly-YYYY-MM-DD-<hash>. Newer releases use a 2-digit month
 # number; older releases used the full month name (or a 3-letter abbreviation).
+# A trailing variant suffix (nightly-YYYY-MM-DD-<hash>-safe) is tolerated.
 # Echoes YYYY-MM-DD on success, prints an error and returns 1 on malformed input.
 parse_tag_date() {
     local tag="$1"
@@ -526,24 +547,53 @@ parse_tag_date() {
     echo "${year}-${mon_num}-${day}"
 }
 
-# find_nightly_dir <hash>
+# Nightly variants. The nightlies repo publishes the regular build under
+# nightly-YYYY-MM-DD-<hash> and, for recent nightlies, a ReleaseSafe build of
+# the same commit under nightly-YYYY-MM-DD-<hash>-safe. rocup carries the
+# variant as "" (regular) or "safe", appends the same suffix to the on-disk
+# dir name (roc_nightly-YYYY-MM-DD-<hash>-safe), and addresses it on the
+# command line as <hash>-safe / latest-safe.
+
+# variant_suffix <variant>
+# Echoes "" for the regular build, "-safe" for the safe build.
+variant_suffix() {
+    [ -n "$1" ] && echo "-$1"
+    return 0
+}
+
+# variant_label <variant>
+# Echoes "nightlies" or "safe nightlies" for messages.
+variant_label() {
+    [ -n "$1" ] && echo "safe nightlies" || echo "nightlies"
+}
+
+# tag_hash <tag>
+# Echoes the 7-char commit hash from a nightly tag of either variant.
+tag_hash() {
+    local tag="${1%-safe}"
+    echo "${tag##*-}"
+}
+
+# find_nightly_dir <hash> [variant]
 # Echoes the basename of the nightly directory for this 7-char hash, or empty.
 # Supports both 'roc_nightly-YYYY-MM-DD-<hash>' (new) and 'roc_nightly-<hash>'
 # (legacy). Returns 0 regardless of whether a match was found — callers should
 # check whether the output is empty.
 find_nightly_dir() {
-    local hash="$1"
+    local hash="$1" variant="${2:-}"
     if [ ! -d "$ROCUP_HOME" ]; then
         return 0
     fi
-    local found
+    local suffix found
+    suffix=$(variant_suffix "$variant")
     found=$(find "$ROCUP_HOME" -maxdepth 1 -mindepth 1 \
         \( -type d -o -type l \) \
-        -name "roc_nightly-*-${hash}" -print -quit 2>/dev/null)
+        -name "roc_nightly-*-${hash}${suffix}" -print -quit 2>/dev/null)
     if [ -n "$found" ]; then
         basename "$found"
         return 0
     fi
+    [ -z "$variant" ] || return 0
     local legacy="$ROCUP_HOME/roc_nightly-${hash}"
     if [ -e "$legacy" ] || [ -L "$legacy" ]; then
         echo "roc_nightly-${hash}"
@@ -561,7 +611,7 @@ dir_sort_key() {
     local dir="$1"
     local name
     name=$(basename "$dir")
-    if [[ "$name" =~ ^roc_nightly-([0-9]{4})-([0-9]{2})-([0-9]{2})-[0-9a-f]{7}$ ]]; then
+    if [[ "$name" =~ ^roc_nightly-([0-9]{4})-([0-9]{2})-([0-9]{2})-[0-9a-f]{7}(-safe)?$ ]]; then
         echo "${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
         return 0
     fi
@@ -600,13 +650,14 @@ local_mdy() {
     date -d "@$epoch" +%m/%d/%Y
 }
 
-# fetch_recent_tags <repo> <count>
+# fetch_recent_tags <repo> <count> [variant]
 # Echoes tag names newline-separated, newest first by the date embedded in the
-# tag. GitHub orders releases by created_at, which tracks commits in the
-# nightlies repo rather than the nightly date, so the API order is unreliable.
-# We always fetch at least a full page, sort by tag date, then truncate.
+# tag, restricted to the given variant ("" = regular, "safe"). GitHub orders
+# releases by created_at, which tracks commits in the nightlies repo rather
+# than the nightly date, so the API order is unreliable. We always fetch at
+# least a full page, sort by tag date, then truncate.
 fetch_recent_tags() {
-    local repo="$1" count="$2"
+    local repo="$1" count="$2" variant="${3:-}"
     # Test hook: force the empty-tags response so callers exercise the offline /
     # installed-only fallback path. Used by 06-step-offline.sh.
     if [ "${ROCUP_TEST_OFFLINE:-0}" = "1" ]; then
@@ -618,7 +669,21 @@ fetch_recent_tags() {
     if ! raw=$(fetch_tags_unsorted "$repo" "$fetch_count"); then
         return 1
     fi
-    sort_tags_by_date "$raw" | head -n "$count"
+    sort_tags_by_date "$(select_nightly_tags "$raw" "$variant")" | head -n "$count"
+}
+
+# select_nightly_tags <tags-newline-separated> [variant]
+# Echoes only the tags of one variant: those ending in the 7-char commit hash
+# for the regular build, or in <hash>-safe for the safe build. Each variant
+# has its own release timeline; anything else (junk, unknown suffixes) is
+# dropped so it can't become "latest" or shift +N/-N offsets.
+select_nightly_tags() {
+    local tag suffix
+    suffix=$(variant_suffix "${2:-}")
+    while IFS= read -r tag; do
+        [[ "$tag" =~ -[0-9a-f]{7}${suffix}$ ]] && printf '%s\n' "$tag"
+    done <<< "$1"
+    return 0
 }
 
 # sort_tags_by_date <tags-newline-separated>
@@ -664,13 +729,15 @@ fetch_tags_unsorted() {
                      | sed 's/.*"\([^"]*\)"$/\1/'
 }
 
-# download_nightly_asset <tag> <platform> <hash> <dest_dir>
+# download_nightly_asset <tag> <platform> <hash> <dest_dir> [variant]
 # Downloads the matching nightly tarball into dest_dir. Echoes its path.
 # Tries gh release download first, falls back to a direct curl from the
 # public download URL (which doesn't require auth for public releases).
 download_nightly_asset() {
-    local tag="$1" platform="$2" hash="$3" dest_dir="$4"
-    local pattern="roc_nightly-${platform}-*-${hash}.tar.gz"
+    local tag="$1" platform="$2" hash="$3" dest_dir="$4" variant="${5:-}"
+    local suffix
+    suffix=$(variant_suffix "$variant")
+    local pattern="roc_nightly-${platform}-*-${hash}${suffix}.tar.gz"
 
     if command -v gh >/dev/null 2>&1; then
         if gh release download "$tag" --repo roc-lang/nightlies \
@@ -689,8 +756,8 @@ download_nightly_asset() {
     if ! date_ymd=$(parse_tag_date "$tag"); then
         return 1
     fi
-    t_hash="${tag##*-}"
-    local asset="roc_nightly-${platform}-${date_ymd}-${t_hash}.tar.gz"
+    t_hash=$(tag_hash "$tag")
+    local asset="roc_nightly-${platform}-${date_ymd}-${t_hash}${suffix}.tar.gz"
     local url="https://github.com/roc-lang/nightlies/releases/download/${tag}/${asset}"
     local out="$dest_dir/$asset"
     if ! curl -fL --progress-bar -o "$out" "$url"; then
@@ -700,17 +767,18 @@ download_nightly_asset() {
     echo "$out"
 }
 
+# resolve_latest_hash [variant]
 resolve_latest_hash() {
-    local tags tag hash
-    if ! tags=$(fetch_recent_tags roc-lang/nightlies 1); then
+    local variant="${1:-}" tags tag hash
+    if ! tags=$(fetch_recent_tags roc-lang/nightlies 1 "$variant"); then
         exit 1
     fi
     tag="${tags%%$'\n'*}"
     if [ -z "$tag" ]; then
-        echo "error: could not find any nightly releases in roc-lang/nightlies" >&2
+        echo "error: could not find any $(variant_label "$variant") in roc-lang/nightlies" >&2
         exit 1
     fi
-    hash="${tag##*-}"
+    hash=$(tag_hash "$tag")
     if [[ ! "$hash" =~ ^[0-9a-f]{7}$ ]]; then
         echo "error: latest release tag '$tag' did not end in a 7-char hash" >&2
         exit 1
@@ -718,36 +786,44 @@ resolve_latest_hash() {
     echo "$hash"
 }
 
+# install_nightly <hash> <platform> [variant]
 install_nightly() {
     local hash="$1"
     local platform="$2"
+    local variant="${3:-}"
+    local suffix
+    suffix=$(variant_suffix "$variant")
 
     mkdir -p "$ROCUP_HOME"
 
     # Short-circuit if we already have this hash on disk in any format.
     local existing
-    existing=$(find_nightly_dir "$hash")
+    existing=$(find_nightly_dir "$hash" "$variant")
     if [ -n "$existing" ] && [ -x "$ROCUP_HOME/$existing/roc" ]; then
-        echo ".. nightly $hash already extracted at $ROCUP_HOME/$existing; skipping download"
+        echo ".. nightly $hash$suffix already extracted at $ROCUP_HOME/$existing; skipping download"
         activate "$existing"
         return 0
     fi
 
-    echo ".. looking up nightly release with hash $hash"
+    echo ".. looking up nightly release with hash $hash$suffix"
     local tags
-    if ! tags=$(fetch_recent_tags roc-lang/nightlies 200); then
+    if ! tags=$(fetch_recent_tags roc-lang/nightlies 200 "$variant"); then
         exit 1
     fi
     local tag=""
     while IFS= read -r line; do
-        if [[ "$line" == *-"$hash" ]]; then
+        if [[ "$line" == *-"$hash$suffix" ]]; then
             tag="$line"
             break
         fi
     done <<< "$tags"
 
     if [ -z "$tag" ]; then
-        echo "error: no nightly release with hash '$hash' found in roc-lang/nightlies" >&2
+        if [ -n "$variant" ]; then
+            echo "error: no safe build of nightly '$hash' found in roc-lang/nightlies (safe builds exist only for recent nightlies; 'rocup $hash' installs the regular build)" >&2
+        else
+            echo "error: no nightly release with hash '$hash' found in roc-lang/nightlies" >&2
+        fi
         exit 1
     fi
     echo ".. found release: $tag"
@@ -756,14 +832,14 @@ install_nightly() {
     if ! date_ymd=$(parse_tag_date "$tag"); then
         exit 1
     fi
-    local dir_name="roc_nightly-${date_ymd}-${hash}"
+    local dir_name="roc_nightly-${date_ymd}-${hash}${suffix}"
     local target_dir="$ROCUP_HOME/$dir_name"
 
     local download_dir
     download_dir=$(mktemp -d "${TMPDIR:-/tmp}/rocup-nightly.XXXXXX")
     echo ".. downloading nightly asset for $platform"
     local tarball
-    if ! tarball=$(download_nightly_asset "$tag" "$platform" "$hash" "$download_dir"); then
+    if ! tarball=$(download_nightly_asset "$tag" "$platform" "$hash" "$download_dir" "$variant"); then
         rm -rf "$download_dir"
         exit 1
     fi
@@ -784,7 +860,10 @@ install_nightly() {
 # signed-offset is "+N" or "-N" with N a positive integer.
 # Activates the nightly N positions newer (+) or older (-) than the active one.
 # Prefers the GitHub release timeline; falls back to installed nightlies when
-# offline. The active version must already be a nightly.
+# offline. The active version must already be a nightly. Stepping stays within
+# the active build's variant: from a safe build, only safe builds are
+# considered, and running off the end of that (shorter) timeline is an error
+# rather than a silent switch to the regular build.
 step_nightly() {
     local raw="$1"
     if [[ ! "$raw" =~ ^[+-][0-9]+$ ]]; then
@@ -823,28 +902,35 @@ step_nightly() {
             ;;
     esac
 
-    local active_hash="${active##*-}"
+    local variant=""
+    [[ "$active" == *-safe ]] && variant="safe"
+    local active_hash
+    active_hash=$(tag_hash "$active")
     if [[ ! "$active_hash" =~ ^[0-9a-f]{7}$ ]]; then
         echo "error: could not parse active nightly hash from '$active'" >&2
         exit 1
     fi
 
-    echo ".. stepping $raw from $active_hash"
+    echo ".. stepping $raw from $active_hash$(variant_suffix "$variant")"
 
     local tags
-    if tags=$(fetch_recent_tags roc-lang/nightlies 200) && [ -n "$tags" ]; then
-        _step_via_tags "$sign" "$n" "$active_hash" "$tags"
+    if tags=$(fetch_recent_tags roc-lang/nightlies 200 "$variant") && [ -n "$tags" ]; then
+        _step_via_tags "$sign" "$n" "$active_hash" "$tags" "$variant"
         return $?
     fi
 
     echo ".. network unavailable; using installed nightlies only"
-    _step_via_installed "$sign" "$n" "$active"
+    _step_via_installed "$sign" "$n" "$active" "$variant"
 }
 
-# _step_via_tags <sign> <n> <active_hash> <tags-newline-separated>
-# Resolves the target via the GitHub release timeline and installs/activates.
+# _step_via_tags <sign> <n> <active_hash> <tags-newline-separated> [variant]
+# Resolves the target via the GitHub release timeline (already restricted to
+# the active variant) and installs/activates.
 _step_via_tags() {
-    local sign="$1" n="$2" active_hash="$3" tags="$4"
+    local sign="$1" n="$2" active_hash="$3" tags="$4" variant="${5:-}"
+    local suffix label
+    suffix=$(variant_suffix "$variant")
+    label=$(variant_label "$variant")
     local -a tag_arr=()
     while IFS= read -r line; do
         [ -n "$line" ] && tag_arr+=("$line")
@@ -852,22 +938,28 @@ _step_via_tags() {
 
     local i=-1 idx
     for idx in "${!tag_arr[@]}"; do
-        if [[ "${tag_arr[$idx]}" == *-"$active_hash" ]]; then
+        if [[ "${tag_arr[$idx]}" == *-"$active_hash$suffix" ]]; then
             i=$idx
             break
         fi
     done
 
     if [ "$i" -lt 0 ]; then
-        echo "error: active nightly $active_hash is older than the most recent 200 releases; relative navigation is not supported from here. Use 'rocup latest' or a specific hash." >&2
+        echo "error: active nightly $active_hash$suffix is older than the most recent 200 $label; relative navigation is not supported from here. Use 'rocup latest' or a specific hash." >&2
         exit 1
     fi
+
+    # Safe builds exist only for recent nightlies, so the safe timeline runs
+    # out sooner than the regular one. Point at the exit rather than crossing
+    # over silently.
+    local hint=""
+    [ -n "$variant" ] && hint=" Use 'rocup $active_hash' to switch to the regular build of this nightly."
 
     local target_idx
     if [ "$sign" = "+" ]; then
         target_idx=$((i - n))
         if [ "$target_idx" -lt 0 ]; then
-            echo "error: only $i nightlies newer than active; cannot step +$n." >&2
+            echo "error: only $i $label newer than active; cannot step +$n.$hint" >&2
             exit 1
         fi
     else
@@ -875,25 +967,28 @@ _step_via_tags() {
         local total=${#tag_arr[@]}
         if [ "$target_idx" -ge "$total" ]; then
             local available=$((total - i - 1))
-            echo "error: only $available nightlies older than active in the most recent 200; cannot step -$n." >&2
+            echo "error: only $available $label older than active in the most recent 200; cannot step -$n.$hint" >&2
             exit 1
         fi
     fi
 
     local target_tag="${tag_arr[$target_idx]}"
     echo ".. target: $target_tag"
-    local target_hash="${target_tag##*-}"
+    local target_hash
+    target_hash=$(tag_hash "$target_tag")
 
     local platform
     platform=$(detect_platform)
-    install_nightly "$target_hash" "$platform"
+    install_nightly "$target_hash" "$platform" "$variant"
 }
 
-# _step_via_installed <sign> <n> <active-dirname>
-# Walks installed nightlies sorted by dir_sort_key (newest-first). Activate-only;
-# does not download (offline path).
+# _step_via_installed <sign> <n> <active-dirname> [variant]
+# Walks installed nightlies of the active variant sorted by dir_sort_key
+# (newest-first). Activate-only; does not download (offline path).
 _step_via_installed() {
-    local sign="$1" n="$2" active="$3"
+    local sign="$1" n="$2" active="$3" variant="${4:-}"
+    local label
+    label="installed $(variant_label "$variant")"
 
     if [ ! -d "$ROCUP_HOME" ]; then
         echo "error: no installed nightlies (offline; only installed nightlies considered)" >&2
@@ -906,12 +1001,18 @@ _step_via_installed() {
         \( -type d -o -type l \) \
         -name 'roc_nightly-*' -print0 \
         | while IFS= read -r -d '' dir; do
-            printf "%s %s\n" "$(dir_sort_key "$dir")" "$(basename "$dir")" >> "$tmp"
+            name=$(basename "$dir")
+            case "$variant/$name" in
+                /*-safe) continue ;;
+                safe/*-safe) ;;
+                safe/*) continue ;;
+            esac
+            printf "%s %s\n" "$(dir_sort_key "$dir")" "$name" >> "$tmp"
         done
 
     if [ ! -s "$tmp" ]; then
         rm -f "$tmp"
-        echo "error: no installed nightlies (offline; only installed nightlies considered)" >&2
+        echo "error: no $label (offline; only installed nightlies considered)" >&2
         exit 1
     fi
 
@@ -938,7 +1039,7 @@ _step_via_installed() {
     if [ "$sign" = "+" ]; then
         target_idx=$((i - n))
         if [ "$target_idx" -lt 0 ]; then
-            echo "error: only $i installed nightlies newer than active; cannot step +$n (offline; only installed nightlies considered)." >&2
+            echo "error: only $i $label newer than active; cannot step +$n (offline; only installed nightlies considered)." >&2
             exit 1
         fi
     else
@@ -946,7 +1047,7 @@ _step_via_installed() {
         local total=${#names[@]}
         if [ "$target_idx" -ge "$total" ]; then
             local available=$((total - i - 1))
-            echo "error: only $available installed nightlies older than active; cannot step -$n (offline; only installed nightlies considered)." >&2
+            echo "error: only $available $label older than active; cannot step -$n (offline; only installed nightlies considered)." >&2
             exit 1
         fi
     fi
@@ -1021,6 +1122,10 @@ validate_freeze_name() {
             echo "freeze: name '$name' conflicts with an existing version hash; choose another name" >&2
             return 1
         fi
+    fi
+    if [[ "$name" =~ ^[0-9a-f]{7}-safe$ ]] && [ -n "$(find_nightly_dir "${name%-safe}" safe)" ]; then
+        echo "freeze: name '$name' conflicts with an existing version hash; choose another name" >&2
+        return 1
     fi
     return 0
 }
@@ -1366,6 +1471,13 @@ case "$cmd" in
         install_nightly "$hash" "$platform"
         ensure_bin_links
         ;;
+    latest-safe)
+        platform=$(detect_platform)
+        hash=$(resolve_latest_hash safe)
+        echo ".. latest safe nightly hash: $hash"
+        install_nightly "$hash" "$platform" safe
+        ensure_bin_links
+        ;;
     list)
         do_list
         ;;
@@ -1375,7 +1487,7 @@ case "$cmd" in
         ;;
     remove)
         if [ $# -lt 2 ]; then
-            echo "error: 'remove' requires an argument (alpha4, 7-char hash, or local-<hash>)" >&2
+            echo "error: 'remove' requires an argument (alpha4, 7-char hash, <hash>-safe, or local-<hash>)" >&2
             usage >&2
             exit 1
         fi
@@ -1418,6 +1530,12 @@ case "$cmd" in
                 install_nightly "$hash" "$platform"
                 ensure_bin_links
             fi
+        elif [[ "$cmd" =~ ^[0-9a-f]{7,8}-safe$ ]]; then
+            # Safe build of a nightly. Locals are never safe variants, so
+            # there is no local-<hash> lookup here.
+            platform=$(detect_platform)
+            install_nightly "${cmd:0:7}" "$platform" safe
+            ensure_bin_links
         elif [[ "$cmd" == frozen-* ]] && [ -d "$ROCUP_HOME/$cmd" ]; then
             activate "$cmd"
             ensure_bin_links

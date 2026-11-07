@@ -46,7 +46,7 @@ foreach ($cmd in @('latest', 'list', 'local', 'remove', 'prune')) {
 # word-wrap alone is fine but any word-splitting or reordering would fail.
 $flat = (Invoke-HelpAtWidth 60) -replace "`r", '' -replace "\s+", ' '
 foreach ($phrase in @(
-    '<hash> | <path> | local | +N | -N | list',
+    '<hash>[-safe] | <path> | local | +N | -N | list',
     'install/activate the most recent nightly',
     'roc-lang/nightlies',
     'default if no arg',

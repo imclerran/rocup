@@ -51,13 +51,14 @@ rocup [alpha4 | latest | <hash> | <path> | local | +N | -N | list | freeze <name
 | `rocup alpha4` | Install/activate the `alpha4-rolling` release from `roc-lang/roc`. |
 | `rocup latest` | Install/activate the most recent nightly from `roc-lang/nightlies`. This is the default if no argument is given. |
 | `rocup <hash>` | 7- or 8-char hex (8-char matches the output of `roc --version`, and is truncated to 7 to look up GitHub releases). If a local install with that hash is registered, activate it. Otherwise activate the matching nightly (downloading it if necessary). |
+| `rocup latest-safe` / `rocup <hash>-safe` | Same as above, but for the **safe build**: the same compiler built with Zig's ReleaseSafe mode, so runtime safety checks (bounds, overflow) stay on and a compiler bug panics instead of silently corrupting memory. Slower than the regular build; `roc version` reports the same nightly. Safe builds are published for recent nightlies only. Regular and safe builds of one nightly are installed side by side and switched between without re-downloading. |
 | `rocup <path>` | Register a local `roc` build as `local-<hash>` and activate it. Path is a directory containing `roc` (and optionally `roc_language_server`); on macOS/Linux it may also point directly at a `roc` binary. Registration is by symlink (NTFS junction on Windows), not copy. |
 | `rocup local` | Activate a registered local `roc` build. With one local registered, activates it; with several, activates the most recently built one (newest `roc` binary mtime). Errors if none are registered. |
-| `rocup +N` / `rocup -N` | Step `N` nightlies newer (`+`) or older (`-`) than the active one. Resolves against the `roc-lang/nightlies` release timeline, falling back to installed nightlies only when offline. Requires the active version to be a nightly. |
+| `rocup +N` / `rocup -N` | Step `N` nightlies newer (`+`) or older (`-`) than the active one. Resolves against the `roc-lang/nightlies` release timeline, falling back to installed nightlies only when offline. Requires the active version to be a nightly. From a safe build, steps among safe builds only; stepping past the oldest safe build is an error that names the regular build to switch to. |
 | `rocup list` | Show installed versions, oldest first, with the active version marked `->`. Local entries also show their resolved path. |
 | `rocup freeze <name>` | Snapshot the active local build into `~/.rocup/frozen-<name>/` as real files (binaries are dereferenced and copied, not symlinked). Requires an active `local-<hash>`; the original local registration is preserved and `frozen-<name>` becomes active. Names match `[a-zA-Z0-9._-]` and must not collide with an installed hash. Pass `--force` to overwrite. |
-| `rocup remove <ver>` | Delete a version — `alpha4`, a 7- or 8-char hash, or `local-<hash>`. A bare hash resolves to a registered local first, otherwise a nightly. If the removed version was active, the most recent remaining one becomes active. Removing a local only drops the registration; the actual source files are untouched. |
-| `rocup prune <N>` | Keep the `N` most recent nightlies; delete older ones. `alpha4` and local registrations are exempt. The active nightly is always kept. |
+| `rocup remove <ver>` | Delete a version — `alpha4`, a 7- or 8-char hash, `<hash>-safe`, or `local-<hash>`. A bare hash resolves to a registered local first, otherwise a nightly. If the removed version was active, the most recent remaining one becomes active. Removing a local only drops the registration; the actual source files are untouched. |
+| `rocup prune <N>` | Keep the `N` most recent nightlies; delete older ones. Safe builds count as nightlies. `alpha4` and local registrations are exempt. The active nightly is always kept. |
 
 ### Examples
 
@@ -65,6 +66,8 @@ rocup [alpha4 | latest | <hash> | <path> | local | +N | -N | list | freeze <name
 rocup                        # install/activate the latest nightly
 rocup alpha4                 # switch to the alpha4-rolling release
 rocup a1b2c3d                # activate (or download) nightly a1b2c3d
+rocup latest-safe            # the ReleaseSafe build of the latest nightly
+rocup a1b2c3d-safe           # the ReleaseSafe build of nightly a1b2c3d
 rocup ~/src/roc/zig-out/bin  # register and activate a local dev build
 rocup local                  # re-activate the most recent local build
 rocup freeze myfeature       # snapshot the active local build as frozen-myfeature
