@@ -4,6 +4,7 @@
 |-------------------------------------------------------------|:---------------------:|:---------------------:|
 | `latest` — install/activate newest nightly                  | yes                   | yes                   |
 | `<hash>` — install/activate a specific nightly              | yes                   | yes                   |
+| `latest-safe` / `<hash>-safe` — ReleaseSafe build variants  | yes                   | yes                   |
 | `+N` / `-N` — step through the nightly timeline             | yes                   | yes                   |
 | `list` — show installed versions                            | yes                   | yes                   |
 | `remove <ver>` — delete a version                           | yes                   | yes                   |
